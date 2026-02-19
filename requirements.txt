@@ -1,0 +1,6 @@
+streamlit>=1.30.0
+neo4j>=5.0.0
+pinecone>=5.0.0
+openai>=1.10.0
+streamlit-agraph>=0.0.45
+python-dotenv>=1.0.0
