@@ -131,290 +131,56 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
         raise last_exc
 
 
-def classify_stance(text_a: str, text_b: str, doc_a_id: str = "", doc_b_id: str = "") -> dict:
-    """
-    Classify the relationship between two legal text excerpts.
+# ── LLM-powered query expansion ─────────────────────────────────────────────
 
-    Uses the Indonesian legal framework for determining:
-    - MENENTANG (Contradiction): authority conflicts, contradictory obligations,
-      hierarchy violations, inconsistent terminology.
-    - MENDUKUNG (Entailment): delegation/attribution relationship, complementary
-      operationalisation, consistent normative alignment.
-    - NETRAL (Neutral): different jurisdictional domains, mutually exclusive
-      subject matter, no substantive overlap.
+def expand_query(query: str) -> list[str]:
+    """Use GPT to generate expanded search terms for an Indonesian legal query.
 
-    Returns:
-        {
-            "stance": "MENDUKUNG" | "MENENTANG" | "NETRAL",
-            "reason": "Brief explanation in Indonesian",
-            "confidence": 0.0 - 1.0
-        }
+    Returns 3-5 alternative search phrases that capture the same legal concept
+    using different terminology, specific UU/PP references, and synonyms.
     """
     client = get_llm_client()
 
-    system_prompt = """Kamu adalah ahli hukum tata negara Indonesia senior yang mengklasifikasikan hubungan antar kutipan regulasi.
+    system_prompt = """Kamu adalah pakar hukum Indonesia. Tugasmu adalah menghasilkan variasi query pencarian untuk menemukan dokumen regulasi yang relevan di database vektor.
 
-═══ KERANGKA KLASIFIKASI ═══
+Untuk setiap pertanyaan hukum yang diberikan, hasilkan 3-5 variasi pencarian yang:
+1. Menggunakan istilah hukum formal yang berbeda (sinonim hukum)
+2. Menyebutkan UU/PP/Permen spesifik yang kemungkinan mengatur topik tersebut
+3. Menggunakan frasa kunci dari pasal yang relevan
+4. Mencakup istilah teknis yang mungkin muncul di dokumen regulasi
 
-1. MENENTANG (Kontradiksi / Disharmoni)
-   Teks B bertentangan dengan Teks A apabila memenuhi SATU ATAU LEBIH:
-   a) Benturan Kewenangan: Memberikan otoritas kepada organ berbeda atas objek urusan identik.
-   b) Pertentangan Hak & Kewajiban: Teks A mewajibkan X, Teks B melarang/membatasi X.
-   c) Inkonsistensi Terminologi: Definisi/parameter berbeda untuk istilah yang sama.
-   d) Pelanggaran Hierarki (Lex Superior): Ketentuan tingkat rendah berlawanan dengan tingkat tinggi.
-   e) Pencabutan Kronologis (Lex Posterior): Regulasi baru mencabut/mengubah regulasi lama sederajat.
-   f) Pengecualian Khusus (Lex Specialis): Regulasi khusus mengesampingkan regulasi umum sederajat.
-
-2. MENDUKUNG (Entailment / Sesuai / Komplementer)
-   Teks B mendukung Teks A apabila:
-   a) Hubungan Delegasi: Teks B mengoperasionalisasikan norma abstrak Teks A via petunjuk teknis.
-   b) Konsistensi Substansial: Norma selaras, saling melengkapi, memperkuat.
-   c) Keselarasan Asas: Alignment teleologis konsisten.
-
-3. NETRAL (Tidak Berhubungan)
-   a) Yurisdiksi terpisah: Urusan absolut pusat vs. otonomi daerah tanpa irisan.
-   b) Substansi eksklusif: Objek pengaturan, domain kelembagaan, rezim hukum terisolasi.
-   c) Perubahan satu regulasi tidak mempengaruhi validitas regulasi lainnya.
-
-Berikan output dalam format JSON:
-{"stance": "MENDUKUNG|MENENTANG|NETRAL", "reason": "Penjelasan 1-2 kalimat menyebutkan indikator spesifik", "confidence": 0.0-1.0}
-
-HANYA output JSON, tanpa teks lain."""
-
-    user_prompt = f"""Analisis hubungan antara dua kutipan regulasi berikut:
-
-Dokumen A ({doc_a_id}):
-{text_a[:2000]}
-
-Dokumen B ({doc_b_id}):
-{text_b[:2000]}
-
-Klasifikasikan sebagai MENDUKUNG, MENENTANG, atau NETRAL berdasarkan kerangka analitis di atas."""
+Format output: Satu variasi per baris, tanpa nomor atau bullet."""
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": f"Pertanyaan: {query}"},
             ],
-            max_tokens=300,
-            temperature=0.1,
+            max_tokens=250,
+            temperature=0.4,
         )
-
-        raw = response.choices[0].message.content.strip()
-        # Try to parse JSON from response
-        # Handle potential markdown code blocks
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        result = json.loads(raw)
-
-        # Validate
-        valid_stances = {"MENDUKUNG", "MENENTANG", "NETRAL"}
-        if result.get("stance") not in valid_stances:
-            result["stance"] = "NETRAL"
-        if "confidence" not in result:
-            result["confidence"] = 0.5
-        if "reason" not in result:
-            result["reason"] = "No explanation provided."
-
-        return result
-
-    except json.JSONDecodeError:
-        return {
-            "stance": "NETRAL",
-            "reason": f"Failed to parse LLM response: {raw[:200]}",
-            "confidence": 0.0,
-        }
-    except Exception as e:
-        return {
-            "stance": "NETRAL",
-            "reason": f"Error: {str(e)}",
-            "confidence": 0.0,
-        }
+        raw = response.choices[0].message.content or ""
+        # Parse lines, skip empty
+        lines = [ln.strip().lstrip("0123456789.-) ") for ln in raw.strip().splitlines()]
+        return [ln for ln in lines if len(ln) > 5][:5]
+    except Exception:
+        return []  # Graceful fallback — proceed with original query only
 
 
-def batch_classify(pairs: list[dict]) -> list[dict]:
-    """
-    Classify stance for multiple pairs of texts.
+# ── LLM-powered document catalog search ──────────────────────────────────────
 
-    Args:
-        pairs: List of dicts with keys: text_a, text_b, doc_a_id, doc_b_id
+def smart_doc_lookup(query: str, all_docs: list[dict]) -> list[str]:
+    """Use GPT to identify relevant documents from the full Neo4j catalog.
 
-    Returns:
-        List of stance classification results.
-    """
-    _cache = {}
-    if _IN_STREAMLIT:
-        _cache = st.session_state
+    The LLM examines document metadata (doc_id, judul, jenis) to determine
+    which documents are likely relevant to the user's legal question,
+    even if the embedding model fails to surface them.
 
-    results = []
-    for pair in pairs:
-        # Check session state cache
-        cache_key = f"stance_{pair.get('doc_a_id', '')}_{pair.get('doc_b_id', '')}"
-        if cache_key in _cache:
-            results.append(_cache[cache_key])
-            continue
-
-        result = classify_stance(
-            text_a=pair["text_a"],
-            text_b=pair["text_b"],
-            doc_a_id=pair.get("doc_a_id", ""),
-            doc_b_id=pair.get("doc_b_id", ""),
-        )
-
-        # Cache in session state
-        _cache[cache_key] = result
-        results.append(result)
-
-    return results
-
-
-def ask_about_documents(query: str, context_chunks: list[dict]) -> str:
-    """
-    RAG-style question answering: given a user query and relevant context chunks,
-    generate an answer grounded in the legal documents.
-    """
-    client = get_llm_client()
-
-    # Build context string
-    context_parts = []
-    for i, chunk in enumerate(context_chunks, 1):
-        doc_id = chunk.get("doc_id", "Unknown")
-        scope = chunk.get("scope", "")
-        content = chunk.get("content", "")
-        context_parts.append(f"[{i}] {doc_id} ({scope}):\n{content}")
-
-    context_str = "\n\n".join(context_parts)
-
-    system_prompt = """Kamu adalah asisten hukum Indonesia yang menjawab pertanyaan berdasarkan dokumen regulasi yang diberikan.
-Jawab dalam Bahasa Indonesia. Selalu sebutkan sumber dokumen yang relevan (doc_id).
-Jika informasi tidak cukup untuk menjawab, katakan dengan jujur."""
-
-    user_prompt = f"""Konteks dari dokumen regulasi:
-{context_str}
-
-Pertanyaan: {query}
-
-Jawab berdasarkan konteks di atas."""
-
-    try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=1000,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error generating answer: {str(e)}"
-
-
-def judge_causality(text_a: str, text_b: str, doc_a_id: str = "", doc_b_id: str = "") -> dict:
-    """
-    Judge whether two related legal documents contradict or align.
-
-    Uses comprehensive Indonesian legal framework criteria:
-    - CONTRADICTION: authority conflicts, contradictory obligations, inconsistent
-      terminology, hierarchy violations (Lex Superior / Lex Specialis / Lex Posterior).
-    - ENTAILMENT: delegation relationship, complementary operationalisation,
-      consistent alignment with parent regulation, proper legal drafting.
-    - NEUTRAL: different jurisdictional domains, mutually exclusive subject matter,
-      no substantive overlap.
-
-    Returns:
-        {
-            "kausalitas": "CONTRADICTION" | "ENTAILMENT" | "NEUTRAL",
-            "alasan": "Explanation in Indonesian with specific Pasal/Ayat citations"
-        }
-    """
-    client = get_llm_client()
-
-    system_prompt = """Kamu adalah ahli hukum tata negara Indonesia senior yang menganalisis relasi antar-regulasi berdasarkan kerangka analitis berikut.
-
-═══ KERANGKA KLASIFIKASI ═══
-
-1. CONTRADICTION (Tumpang Tindih / Disharmoni)
-   Dua regulasi diklasifikasikan CONTRADICTION apabila memenuhi SATU ATAU LEBIH indikator berikut:
-   a) Disharmoni Kewenangan: Dua regulasi memberikan kewenangan (perizinan, pengawasan, pengaturan) kepada organ negara berbeda untuk objek urusan yang IDENTIK, tanpa demarkasi koordinasi yang jelas.
-   b) Pertentangan Hak & Kewajiban: Subjek hukum diwajibkan melakukan tindakan oleh Regulasi A, namun tindakan tersebut dilarang atau dibatasi oleh Regulasi B.
-   c) Inkonsistensi Terminologi: Definisi, batasan, atau parameter teknis BERBEDA untuk istilah atau objek yang SAMA dalam rezim hukum yang berdekatan.
-   d) Pelanggaran Hierarki (Lex Superior Derogat Legi Inferiori): Regulasi tingkat rendah bertentangan dengan regulasi tingkat lebih tinggi (UUD > TAP MPR > UU/Perppu > PP > Perpres > Perda).
-   e) Pencabutan Kronologis (Lex Posterior Derogat Legi Priori): Regulasi baru yang sederajat secara eksplisit mencabut atau mengubah ketentuan regulasi lama.
-   f) Pengecualian Kekhususan (Lex Specialis Derogat Legi Generali): Regulasi khusus sederajat mengesampingkan ketentuan regulasi umum untuk hal spesifik.
-
-2. ENTAILMENT (Saling Menguatkan / Komplementer)
-   Dua regulasi diklasifikasikan ENTAILMENT apabila:
-   a) Hubungan Delegasi/Atribusi: Regulasi B merupakan peraturan pelaksana (PP, Perpres, Permen) yang MENGOPERASIONALISASIKAN norma abstrak dari Regulasi A (UU induk) melalui petunjuk teknis yang spesifik.
-   b) Konsistensi Substansial: Kedua regulasi mengatur aspek yang berkaitan dan normanya SELARAS, saling melengkapi, atau memperkuat tanpa pertentangan.
-   c) Keselarasan Asas: Kedua regulasi memiliki alignment teleologis yang konsisten dengan hirarki hukum di atasnya.
-   PENTING: Regulasi pelaksana yang hanya MENGULANG (copy-paste) norma induk tanpa memberikan petunjuk teknis operasional tetap dikategorikan ENTAILMENT, namun sebutkan kelemahan ini dalam alasan.
-
-3. NEUTRAL (Tidak Berhubungan / Mutually Exclusive)
-   Dua regulasi diklasifikasikan NEUTRAL apabila:
-   a) Demarkasi Yurisdiksi: Mengatur urusan pemerintahan yang sepenuhnya terpisah (mis. urusan absolut pusat vs. urusan otonomi daerah yang tidak beririsan).
-   b) Klasterisasi Substansi: Objek pengaturan, domain kelembagaan, atau rezim hukum sepenuhnya terisolasi dan eksklusif satu sama lain.
-   c) Tidak Ada Persinggungan: Eksistensi, perubahan, atau pembatalan satu regulasi TIDAK mendisrupsi validitas maupun operasionalisasi regulasi lainnya.
-
-═══ INSTRUKSI OUTPUT ═══
-Berikan output HANYA dalam format JSON:
-{"kausalitas": "CONTRADICTION|ENTAILMENT|NEUTRAL", "alasan": "Penjelasan 2-4 kalimat dalam Bahasa Indonesia yang WAJIB menyebutkan: (1) indikator spesifik yang terpenuhi, (2) Pasal dan/atau Ayat spesifik dari masing-masing dokumen yang menjadi dasar klasifikasi. Contoh: 'Pasal 5 ayat (2) Dokumen A mendelegasikan ... yang dioperasionalisasikan oleh Pasal 3 Dokumen B ...'"}
-
-HANYA output JSON, tanpa teks lain."""
-
-    user_prompt = f"""Analisis relasi antara dua dokumen regulasi berikut:
-
-Dokumen Sumber ({doc_a_id}):
-{text_a[:3000]}
-
-Dokumen Pembanding ({doc_b_id}):
-{text_b[:3000]}
-
-Klasifikasikan hubungan kedua dokumen ini sebagai CONTRADICTION, ENTAILMENT, atau NEUTRAL berdasarkan kerangka analitis di atas.
-WAJIB: Sebutkan Pasal dan Ayat spesifik dari masing-masing dokumen yang menjadi dasar klasifikasi."""
-
-    try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=400,
-            temperature=0.1,
-        )
-
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        result = json.loads(raw)
-
-        valid = {"CONTRADICTION", "ENTAILMENT", "NEUTRAL"}
-        if result.get("kausalitas") not in valid:
-            result["kausalitas"] = "NEUTRAL"
-        if "alasan" not in result:
-            result["alasan"] = "Tidak ada penjelasan."
-
-        return result
-
-    except json.JSONDecodeError:
-        return {
-            "kausalitas": "NEUTRAL",
-            "alasan": f"Gagal memproses respons LLM: {raw[:200]}",
-        }
-    except Exception as e:
-        return {
-            "kausalitas": "NEUTRAL",
-            "alasan": f"Error: {str(e)}",
-        }
+    Parameters
+    ----------
+    query : str
+        The user's legal question.
+    all_docs : list[dict]
+        Full list 

@@ -1,6 +1,8 @@
 """Pinecone vector database connector for legal document embeddings."""
 
 import os
+import math
+import random
 import functools
 from pinecone import Pinecone
 from dotenv import load_dotenv
@@ -124,51 +126,24 @@ def search_by_text(query: str, top_k: int = 10, scope_filter: str = None) -> lis
 
 @_cache_data(ttl=3600)
 def fetch_by_doc_id(doc_id: str, top_k: int = 100) -> list[dict]:
-    """Fetch all vectors belonging to a specific doc_id using metadata filter."""
+    """Fetch all vectors belonging to a specific doc_id using metadata filter.
+
+    Uses a random unit vector instead of zero vector — cosine similarity
+    with a zero vector is undefined and causes Pinecone to return 0 matches.
+    """
     index = get_index()
 
-    # Use a dummy zero vector to fetch by filter
-    # We need to know the dimension first
     stats = get_index_stats()
     dim = stats.get("dimension", 1024)
 
+    # Random unit vector (deterministic seed per doc_id for cacheability)
+    rng = random.Random(doc_id)
+    rand_vec = [rng.gauss(0, 1) for _ in range(dim)]
+    norm = math.sqrt(sum(x * x for x in rand_vec))
+    if norm > 0:
+        rand_vec = [x / norm for x in rand_vec]
+
     results = index.query(
-        vector=[0.0] * dim,
+        vector=rand_vec,
         top_k=top_k,
-        include_metadata=True,
-        filter={"doc_id": doc_id},
-    )
-
-    hits = []
-    for match in results.get("matches", []):
-        meta = match.get("metadata", {})
-        hits.append({
-            "id": match["id"],
-            "doc_id": meta.get("doc_id", ""),
-            "article_id": meta.get("article_id", ""),
-            "content": meta.get("content", ""),
-            "scope": meta.get("scope", ""),
-        })
-    return hits
-
-
-@_cache_data(ttl=3600)
-def fetch_by_ids(ids: list[str]) -> list[dict]:
-    """Fetch specific vectors by their IDs."""
-    if not ids:
-        return []
-
-    index = get_index()
-    results = index.fetch(ids=ids)
-
-    hits = []
-    for vid, vec_data in results.get("vectors", {}).items():
-        meta = vec_data.get("metadata", {})
-        hits.append({
-            "id": vid,
-            "doc_id": meta.get("doc_id", ""),
-            "article_id": meta.get("article_id", ""),
-            "content": meta.get("content", ""),
-            "scope": meta.get("scope", ""),
-        })
-    return hits
+        include_metadata=T

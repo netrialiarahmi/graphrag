@@ -160,13 +160,13 @@ st.markdown("""
     }
     .stTabs [data-baseweb="tab"]:hover {
         color: #334155;
-        background: rgba(99,102,241,0.05);
+        background: rgba(30,58,95,0.05);
     }
     .stTabs [aria-selected="true"] {
         color: #ffffff !important;
-        background: linear-gradient(135deg, #4f46e5, #6366f1) !important;
+        background: linear-gradient(135deg, #1e3a5f, #2563eb) !important;
         font-weight: 600;
-        box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+        box-shadow: 0 2px 8px rgba(30,58,95,0.3);
     }
     .stTabs [data-baseweb="tab-border"] {
         display: none !important;
@@ -177,18 +177,18 @@ st.markdown("""
 
     /* ── Buttons ─────────────────────────────────────────────────────────── */
     .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
+        background: linear-gradient(135deg, #1e3a5f, #2563eb) !important;
         border: none !important;
         border-radius: 10px;
         font-weight: 600;
         font-size: 0.88rem;
         padding: 0.55rem 1.6rem;
-        box-shadow: 0 2px 12px rgba(99,102,241,0.3);
+        box-shadow: 0 2px 12px rgba(30,58,95,0.3);
         transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         letter-spacing: 0.2px;
     }
     .stButton > button[kind="primary"]:hover {
-        box-shadow: 0 4px 20px rgba(99,102,241,0.45);
+        box-shadow: 0 4px 20px rgba(30,58,95,0.45);
         transform: translateY(-1px);
     }
     .stButton > button[kind="secondary"],
@@ -199,8 +199,8 @@ st.markdown("""
         transition: all 0.25s ease;
     }
     .stButton > button:not([kind="primary"]):hover {
-        border-color: #6366f1 !important;
-        color: #4f46e5 !important;
+        border-color: #2563eb !important;
+        color: #1e3a5f !important;
     }
 
     /* ── Inputs ──────────────────────────────────────────────────────────── */
@@ -212,8 +212,8 @@ st.markdown("""
         transition: all 0.25s ease;
     }
     .stTextInput > div > div > input:focus {
-        border-color: #6366f1 !important;
-        box-shadow: 0 0 0 3px rgba(99,102,241,0.15) !important;
+        border-color: #2563eb !important;
+        box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important;
     }
     .stSelectbox > div > div {
         border-radius: 10px !important;
@@ -263,12 +263,12 @@ st.markdown("""
         top: 0;
         bottom: 0;
         width: 3px;
-        background: linear-gradient(180deg, #6366f1, #a78bfa);
+        background: linear-gradient(180deg, #1e3a5f, #3b82f6);
         border-radius: 3px 0 0 3px;
     }
     .result-card:hover {
-        border-color: #c7d2fe;
-        box-shadow: 0 4px 16px rgba(99,102,241,0.08);
+        border-color: #bfdbfe;
+        box-shadow: 0 4px 16px rgba(30,58,95,0.08);
         transform: translateY(-2px);
     }
     .result-card-title {
@@ -348,8 +348,8 @@ st.markdown("""
         transition: all 0.25s ease;
     }
     [data-testid="stMetric"]:hover {
-        border-color: #c7d2fe;
-        box-shadow: 0 2px 12px rgba(99,102,241,0.06);
+        border-color: #bfdbfe;
+        box-shadow: 0 2px 12px rgba(30,58,95,0.06);
     }
     [data-testid="stMetricLabel"] {
         color: #94a3b8;
@@ -374,8 +374,8 @@ st.markdown("""
         transition: all 0.2s ease;
     }
     .streamlit-expanderHeader:hover {
-        border-color: #c7d2fe !important;
-        background: #eef2ff !important;
+        border-color: #bfdbfe !important;
+        background: #eff6ff !important;
     }
 
     /* ── Info / Warning / Error ───────────────────────────────────────────── */
@@ -408,7 +408,7 @@ st.markdown("""
         color: #475569;
     }
     .stat-pill-count {
-        background: linear-gradient(135deg, #4f46e5, #6366f1);
+        background: linear-gradient(135deg, #1e3a5f, #2563eb);
         color: #fff;
         font-weight: 700;
         font-size: 0.7rem;
@@ -472,7 +472,108 @@ st.markdown("""
 
     /* ── Spinner ─────────────────────────────────────────────────────────── */
     .stSpinner > div {
-        border-top-color: #6366f1 !important;
+        border-top-color: #2563eb !important;
+    }
+
+    /* ── Kausalitas Dashboard ─────────────────────────────────────────────── */
+    .kpi-row {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 1.2rem;
+    }
+    .kpi-card {
+        flex: 1;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 20px 22px;
+        position: relative;
+        overflow: hidden;
+        transition: all 0.25s ease;
+    }
+    .kpi-card::before {
+        content: "";
+        position: absolute;
+        left: 0; top: 0; bottom: 0;
+        width: 4px;
+        border-radius: 4px 0 0 4px;
+    }
+    .kpi-card:hover {
+        box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+        transform: translateY(-1px);
+    }
+    .kpi-card.kpi-entailment::before { background: linear-gradient(180deg, #059669, #34d399); }
+    .kpi-card.kpi-contradiction::before { background: linear-gradient(180deg, #dc2626, #f87171); }
+    .kpi-card.kpi-neutral::before { background: linear-gradient(180deg, #64748b, #94a3b8); }
+    .kpi-card.kpi-total::before { background: linear-gradient(180deg, #1e3a5f, #3b82f6); }
+    .kpi-label {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-weight: 600;
+        color: #94a3b8;
+        margin-bottom: 6px;
+    }
+    .kpi-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #0f172a;
+        line-height: 1;
+    }
+    .kpi-card.kpi-entailment .kpi-value { color: #059669; }
+    .kpi-card.kpi-contradiction .kpi-value { color: #dc2626; }
+    .kpi-card.kpi-neutral .kpi-value { color: #64748b; }
+    .kpi-card.kpi-total .kpi-value { color: #1e3a5f; }
+
+    mark.pasal-ref {
+        background: linear-gradient(135deg, #eff6ff, #dbeafe);
+        color: #1e3a5f;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.92em;
+        border: 1px solid #bfdbfe;
+    }
+
+    .detail-card {
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 6px;
+        background: #fafbfe;
+    }
+    .detail-card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+    }
+    .detail-card-docs {
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: #1e293b;
+    }
+    .detail-card-arrow {
+        color: #94a3b8;
+        font-size: 0.85rem;
+    }
+    .detail-card-rel {
+        font-size: 0.72rem;
+        color: #64748b;
+        background: #f1f5f9;
+        padding: 2px 10px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        font-weight: 500;
+    }
+    .detail-card-reason {
+        font-size: 0.84rem;
+        color: #475569;
+        line-height: 1.6;
+        margin-top: 8px;
+        padding-top: 10px;
+        border-top: 1px solid #f1f5f9;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -572,7 +673,76 @@ from utils.benchmark_helpers import (
     extract_documents as _extract_documents,
     get_correct_doc_id as _get_correct_doc_id,
     get_unique_doc_ids as _get_unique_doc_ids,
+    extract_doc_ids_from_question as _extract_doc_ids_from_question,
 )
+
+
+def _build_interleaved_context(
+    primary_doc_ids: list[str],
+    related_doc_ids: list[str],
+    context_docs: dict,
+    max_chunks: int = 30,
+    max_chars: int = 12000,
+) -> list[dict]:
+    """Build LLM context by round-robin interleaving chunks from all docs.
+
+    Ensures the LLM sees content from EVERY relevant document, not just
+    the first one.  Primary docs get priority; semantic-scored chunks first.
+    """
+    result: list[dict] = []
+    total_chars = 0
+
+    # Prepare per-doc queues: semantic-scored chunks first, then the rest
+    doc_queues: dict[str, list[dict]] = {}
+    for did in primary_doc_ids + related_doc_ids:
+        info = context_docs.get(did)
+        if not info:
+            continue
+        chunks = list(info["chunks"])
+        scored = sorted(
+            [c for c in chunks if c.get("score") is not None],
+            key=lambda c: c.get("score", 0),
+            reverse=True,
+        )
+        unscored = [c for c in chunks if c.get("score") is None]
+        doc_queues[did] = scored + unscored
+
+    if not doc_queues:
+        return []
+
+    # Round-robin: take one chunk from each doc in turn
+    seen_ids: set[str] = set()
+    doc_keys = list(doc_queues.keys())
+    idx_map = {did: 0 for did in doc_keys}
+    exhausted: set[str] = set()
+
+    while (
+        len(result) < max_chunks
+        and total_chars < max_chars
+        and len(exhausted) < len(doc_keys)
+    ):
+        for did in doc_keys:
+            if did in exhausted:
+                continue
+            queue = doc_queues[did]
+            idx = idx_map[did]
+            if idx >= len(queue):
+                exhausted.add(did)
+                continue
+            chunk = queue[idx]
+            idx_map[did] = idx + 1
+            cid = chunk.get("id", "")
+            if cid and cid in seen_ids:
+                continue
+            if cid:
+                seen_ids.add(cid)
+            content = chunk.get("content", "")
+            total_chars += len(content)
+            result.append(chunk)
+            if len(result) >= max_chunks or total_chars >= max_chars:
+                break
+
+    return result
 
 
 # -- Main Navigation Tabs (4 tabs) --------------------------------------------
@@ -588,67 +758,244 @@ with tab_search:
     section_divider("Tanya Jawab Regulasi")
 
     query = st.text_input(
-        "Pertanyaan",
-        placeholder="Ketik pertanyaan tentang regulasi Indonesia ...",
-        label_visibility="collapsed",
+        "Masukkan pertanyaan hukum Anda",
+        placeholder="Contoh: Apakah perusahaan dapat membagikan dividen interim?",
         key="search_query",
     )
 
     search_btn = st.button("Cari & Jawab", type="primary", key="search_btn")
 
     if query and search_btn:
-        with st.spinner("Mencari dokumen relevan ..."):
+        with st.spinner("Menganalisis pertanyaan & mencari dokumen relevan ..."):
             try:
-                # 1. Embed query via HuggingFace Indo-LegalBERT
-                query_embedding = llm_stance.get_embedding(query)
+                # ════════════════════════════════════════════════════════════
+                # GRAPHRAG-FIRST RETRIEVAL PIPELINE
+                # ════════════════════════════════════════════════════════════
 
-                # 2. Search VDB with high top_k to get 3 unique doc_ids
+                # ── Phase A: Query Analysis ──────────────────────────────
+
+                # A1. Parse explicit doc references from query text
+                regex_doc_ids = _extract_doc_ids_from_question(query)
+
+                # A2. LLM query expansion
+                expanded_terms = llm_stance.expand_query(query)
+
+                # ── Phase B: GraphRAG Document Discovery ─────────────────
+                # Use LLM to identify relevant docs from the FULL Neo4j
+                # catalog — this bypasses the embedding model entirely.
+
+                graph_doc_ids: list[str] = []
+                if neo4j_ok:
+                    all_neo4j_docs = neo4j_client.get_all_documents()
+                    graph_doc_ids = llm_stance.smart_doc_lookup(query, all_neo4j_docs)
+
+                # ── Phase C: VDB Semantic Search (supplementary) ─────────
+
+                query_embedding = llm_stance.get_embedding(query)
                 raw_results = pinecone_client.semantic_search(
                     query_embedding=query_embedding,
-                    top_k=30,
+                    top_k=100,
                 )
 
-                # 3. Get 3 unique doc_ids
-                primary_doc_ids = _get_unique_doc_ids(raw_results, 3)
+                # Also search with expanded terms
+                seen_ids: set[str] = {h.get("id", "") for h in raw_results}
+                for term in expanded_terms[:3]:
+                    try:
+                        term_emb = llm_stance.get_embedding(term)
+                        term_results = pinecone_client.semantic_search(
+                            query_embedding=term_emb, top_k=30,
+                        )
+                        for hit in term_results:
+                            hid = hit.get("id", "")
+                            if hid and hid not in seen_ids:
+                                raw_results.append(hit)
+                                seen_ids.add(hid)
+                    except Exception:
+                        pass
 
-                if not primary_doc_ids:
+                vdb_doc_ids = _get_unique_doc_ids(raw_results, 10)
+
+                # ── Phase D: Merge all doc sources ───────────────────────
+                # Priority: graph_doc_ids (LLM-picked) > regex > VDB
+
+                merged_doc_ids: list[str] = []
+                added: set[str] = set()
+
+                for did in graph_doc_ids:  # LLM catalog picks first
+                    if did not in added:
+                        merged_doc_ids.append(did)
+                        added.add(did)
+                for did in regex_doc_ids:  # Regex-extracted second
+                    if did not in added:
+                        merged_doc_ids.append(did)
+                        added.add(did)
+                for did in vdb_doc_ids:  # VDB third
+                    if did not in added:
+                        merged_doc_ids.append(did)
+                        added.add(did)
+
+                if not merged_doc_ids:
                     st.warning("Tidak ditemukan dokumen yang relevan.")
                     st.stop()
+
+                # ── Phase E: Deep Graph Traversal ────────────────────────
+                # 2-hop traversal from top graph docs to find linked docs
+
+                graph_expanded_ids: list[str] = []
+                if neo4j_ok:
+                    for did in merged_doc_ids[:5]:
+                        try:
+                            subgraph = neo4j_client.get_citing_documents(did, hops=2)
+                            for node in subgraph.get("nodes", []):
+                                ndid = node.get("doc_id", "")
+                                if ndid and ndid not in added:
+                                    graph_expanded_ids.append(ndid)
+                                    added.add(ndid)
+                        except Exception:
+                            pass
+
+                # ── Phase F: Re-ranking ALL candidates ───────────────────
+                # Build summaries from VDB + Neo4j content
+
+                all_candidate_ids = merged_doc_ids + graph_expanded_ids
+                doc_summaries: dict[str, str] = {}
+
+                # Group VDB semantic hits by doc
+                semantic_chunks_by_doc: dict[str, list[dict]] = {}
+                for hit in raw_results:
+                    did = hit.get("doc_id", "")
+                    if did:
+                        semantic_chunks_by_doc.setdefault(did, []).append(hit)
+
+                for did in all_candidate_ids:
+                    summary = ""
+                    # Try VDB first
+                    if did in semantic_chunks_by_doc:
+                        summary = semantic_chunks_by_doc[did][0].get("content", "")
+                    if not summary:
+                        vdb_chunks = pinecone_client.fetch_by_doc_id(did, top_k=3)
+                        if vdb_chunks:
+                            summary = vdb_chunks[0].get("content", "")
+                    # Fallback: Neo4j Pasal content
+                    if not summary and neo4j_ok:
+                        try:
+                            detail = neo4j_client.get_document_detail(did)
+                            pasals = detail.get("pasals", [])
+                            if pasals:
+                                texts = [p.get("content", "") or p.get("name", "") for p in pasals[:3]]
+                                summary = " ".join(t for t in texts if t)
+                        except Exception:
+                            pass
+                    doc_summaries[did] = summary[:500] if summary else ""
+
+                ranked = llm_stance.rerank_documents(query, doc_summaries)
+
+                # Keep docs scoring >= 3, max 7
+                primary_doc_ids = [did for did, score in ranked if score >= 3.0][:7]
+
+                # Ensure graph + regex picks are always included
+                for did in list(graph_doc_ids[:5]) + list(regex_doc_ids):
+                    if did not in primary_doc_ids:
+                        primary_doc_ids.append(did)
+
+                if not primary_doc_ids:
+                    primary_doc_ids = merged_doc_ids[:5]
 
                 st.session_state.search_doc_ids = primary_doc_ids
                 st.session_state.search_results = raw_results
 
-                # 4. Fetch ALL chunks for each primary doc
-                all_context_chunks = []
-                context_docs = {}  # doc_id -> {source: "VDB", chunks: [...]}
+                # ── Phase G: Content Assembly (VDB + Neo4j) ──────────────
+
+                context_docs: dict[str, dict] = {}
+                seen_chunk_ids: set[str] = set()
 
                 for did in primary_doc_ids:
-                    chunks = pinecone_client.fetch_by_doc_id(did, top_k=100)
-                    context_docs[did] = {"source": "VDB (Primary)", "chunks": chunks}
-                    all_context_chunks.extend(chunks)
+                    doc_chunks: list[dict] = []
 
-                # 5. For each primary doc, find up to 3 related docs in Neo4j
-                related_doc_ids = []
+                    # G1. VDB semantic hits first
+                    sem_chunks = semantic_chunks_by_doc.get(did, [])
+                    for ch in sem_chunks:
+                        doc_chunks.append(ch)
+                        seen_chunk_ids.add(ch.get("id", ""))
+
+                    # G2. VDB fetch_by_doc_id supplement
+                    extra = pinecone_client.fetch_by_doc_id(did, top_k=80)
+                    for ch in extra:
+                        cid = ch.get("id", "")
+                        if cid not in seen_chunk_ids:
+                            doc_chunks.append(ch)
+                            seen_chunk_ids.add(cid)
+
+                    # G3. Neo4j Pasal/Ayat content (if VDB has few chunks)
+                    if len(doc_chunks) < 5 and neo4j_ok:
+                        try:
+                            detail = neo4j_client.get_document_detail(did)
+                            for pasal in detail.get("pasals", []):
+                                p_content = pasal.get("content", "")
+                                p_name = pasal.get("name", "")
+                                if p_content and len(p_content) > 20:
+                                    doc_chunks.append({
+                                        "id": f"neo4j-{did}-{p_name}",
+                                        "doc_id": did,
+                                        "article_id": p_name,
+                                        "content": p_content,
+                                        "scope": "neo4j-pasal",
+                                    })
+                            for ayat in detail.get("ayats", []):
+                                a_content = ayat.get("content", "")
+                                a_name = ayat.get("name", "")
+                                p_name = ayat.get("pasal_name", "")
+                                if a_content and len(a_content) > 20:
+                                    doc_chunks.append({
+                                        "id": f"neo4j-{did}-{p_name}-{a_name}",
+                                        "doc_id": did,
+                                        "article_id": f"{p_name} {a_name}",
+                                        "content": a_content,
+                                        "scope": "neo4j-ayat",
+                                    })
+                        except Exception:
+                            pass
+
+                    # Determine source label
+                    if did in regex_doc_ids:
+                        src = "Regex (Explicit)"
+                    elif did in graph_doc_ids:
+                        src = "GraphRAG (LLM Catalog)"
+                    elif did in graph_expanded_ids:
+                        src = "GraphRAG (2-hop)"
+                    else:
+                        src = "VDB (Semantic)"
+                    context_docs[did] = {"source": src, "chunks": doc_chunks}
+
+                # G4. Neo4j direct neighbors as supplementary
+                related_doc_ids: list[str] = []
                 if neo4j_ok:
-                    for did in primary_doc_ids:
-                        related = neo4j_client.get_related_documents(did, limit=3)
+                    for did in primary_doc_ids[:3]:
+                        related = neo4j_client.get_related_documents(did, limit=2)
                         for rdoc in related:
                             rdid = rdoc.get("doc_id", "")
-                            if rdid and rdid not in primary_doc_ids and rdid not in related_doc_ids:
+                            if rdid and rdid not in context_docs and rdid not in related_doc_ids:
                                 related_doc_ids.append(rdid)
 
-                # 6. Fetch content for related docs
                 for rdid in related_doc_ids:
-                    chunks = pinecone_client.fetch_by_doc_id(rdid, top_k=50)
+                    chunks = pinecone_client.fetch_by_doc_id(rdid, top_k=30)
                     if chunks:
                         context_docs[rdid] = {"source": "Neo4j (Related)", "chunks": chunks}
-                        all_context_chunks.extend(chunks)
 
                 st.session_state.search_context_docs = context_docs
 
-                # 7. Build combined context and generate answer
+                # ── Phase H: Context Building & Answer ───────────────────
+
+                llm_chunks = _build_interleaved_context(
+                    primary_doc_ids=primary_doc_ids,
+                    related_doc_ids=related_doc_ids,
+                    context_docs=context_docs,
+                    max_chunks=30,
+                    max_chars=12000,
+                )
+
                 with st.spinner("Menghasilkan jawaban dengan GPT ..."):
-                    answer = llm_stance.ask_about_documents(query, all_context_chunks[:20])
+                    answer = llm_stance.ask_about_documents(query, llm_chunks)
                     st.session_state.search_answer = answer
 
             except Exception as e:
@@ -660,49 +1007,7 @@ with tab_search:
         section_divider("Jawaban")
         st.markdown(st.session_state.search_answer)
 
-    # Display source documents
-    context_docs = st.session_state.search_context_docs
-    if context_docs:
-        section_divider("Dokumen Sumber")
-
-        # Stats
-        n_primary = sum(1 for v in context_docs.values() if "Primary" in v["source"])
-        n_related = sum(1 for v in context_docs.values() if "Related" in v["source"])
-        total_chunks = sum(len(v["chunks"]) for v in context_docs.values())
-
-        st.markdown(
-            f'<div style="display:flex;gap:10px;margin:0.5rem 0 0.75rem;">'
-            f'<span class="stat-pill"><span class="stat-pill-count">{n_primary}</span> dokumen VDB</span>'
-            f'<span class="stat-pill"><span class="stat-pill-count">{n_related}</span> dokumen terkait (Neo4j)</span>'
-            f'<span class="stat-pill"><span class="stat-pill-count">{total_chunks}</span> total chunks</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        for did, info in context_docs.items():
-            with st.expander(f"{did}  [{info['source']}] — {len(info['chunks'])} chunks"):
-                for ch in info["chunks"][:5]:
-                    render_result_card(
-                        doc_id=ch.get("doc_id", ""),
-                        scope=ch.get("scope", "?"),
-                        content=ch.get("content", ""),
-                        score=ch.get("score"),
-                        article_id=ch.get("article_id", ""),
-                    )
-
-        # Show relationship graph between source docs
-        all_source_ids = list(context_docs.keys())
-        if len(all_source_ids) >= 2 and neo4j_ok:
-            section_divider("Hubungan Antar Dokumen")
-            graph_data = neo4j_client.get_edges_between(all_source_ids)
-            if graph_data["nodes"]:
-                st.markdown('<div class="graph-container">', unsafe_allow_html=True)
-                graph_viz.render_document_graph(
-                    doc_nodes=graph_data["nodes"],
-                    doc_edges=graph_data["edges"],
-                    height=400,
-                )
-                st.markdown('</div>', unsafe_allow_html=True)
+    # (Source documents and relationship graph hidden from UI)
 
 
 # ==============================================================================
@@ -712,17 +1017,44 @@ with tab_browse:
     if not neo4j_ok:
         st.error("Neo4j tidak terhubung. Periksa konfigurasi.")
     else:
-        section_divider("Graph Dokumen")
+        section_divider("Hierarki Regulasi Indonesia")
 
         with st.spinner("Memuat graph ..."):
             overview = neo4j_client.get_graph_overview()
 
         if overview["nodes"]:
+            # Stat pills
             st.markdown(
-                f'<div style="display:flex;gap:10px;margin:0.5rem 0;">'
+                f'<div style="display:flex;gap:10px;margin:0.5rem 0 1rem;">'
                 f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["nodes"])}</span> dokumen</span>'
                 f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["edges"])}</span> relasi</span>'
                 f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Legend
+            st.markdown(
+                '<div style="display:flex;gap:24px;align-items:center;margin-bottom:12px;'
+                'font-size:0.78rem;color:#64748b;">'
+                '  <span style="display:flex;align-items:center;gap:6px;">'
+                '    <svg width="32" height="2"><line x1="0" y1="1" x2="32" y2="1"'
+                '     stroke="#2563eb" stroke-width="2"/></svg>'
+                '    Mengutip (CITES)'
+                '  </span>'
+                '  <span style="display:flex;align-items:center;gap:6px;">'
+                '    <svg width="32" height="2"><line x1="0" y1="1" x2="32" y2="1"'
+                '     stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,3"/></svg>'
+                '    Hierarki (HIGHER)'
+                '  </span>'
+                '  <span style="display:flex;align-items:center;gap:6px;">'
+                '    <span style="font-size:0.7rem;">&#8593;</span>'
+                '    Lebih tinggi kedudukannya'
+                '  </span>'
+                '  <span style="display:flex;align-items:center;gap:6px;">'
+                '    <span style="font-size:0.7rem;">&#8594;</span>'
+                '    Lebih baru (tahun)'
+                '  </span>'
+                '</div>',
                 unsafe_allow_html=True,
             )
 
@@ -730,7 +1062,7 @@ with tab_browse:
             selected = graph_viz.render_document_graph(
                 doc_nodes=overview["nodes"],
                 doc_edges=overview["edges"],
-                height=600,
+                height=650,
             )
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -740,12 +1072,13 @@ with tab_browse:
             # Show selected node detail
             if st.session_state.selected_node:
                 sel_id = st.session_state.selected_node
-                section_divider(f"Detail: {sel_id}")
+                section_divider(f"Detail: {graph_viz._get_short_label(sel_id)}")
                 detail = neo4j_client.get_document_detail(sel_id)
                 if detail and detail.get("document"):
                     doc = detail["document"]
                     if doc.get("judul"):
                         st.markdown(f"**{doc['judul']}**")
+                    st.caption(f"ID: {sel_id}")
                     meta_fields = [
                         ("jenis", "Jenis"), ("tahun", "Tahun"),
                         ("nomor", "Nomor"), ("pembentuk", "Pembentuk"),
@@ -826,9 +1159,11 @@ with tab_compare:
 
 
 # ==============================================================================
-# TAB 4: Kausalitas — read-only from output/kausalitas/
+# TAB 4: Kausalitas — Corporate Dashboard
 # ==============================================================================
 with tab_kausalitas:
+    import altair as alt
+
     section_divider("Analisis Kausalitas Antar Dokumen")
 
     _kausalitas_result_path = os.path.join(os.path.dirname(__file__), "output", "kausalitas", "kausalitas_results.csv")
@@ -841,46 +1176,180 @@ with tab_kausalitas:
             "```bash\npython run_kausalitas.py\n```"
         )
     else:
-        st.markdown(
-            "Menampilkan hasil analisis kausalitas (ENTAILMENT / CONTRADICTION / NEUTRAL) "
-            "untuk semua pasangan dokumen yang terhubung di Neo4j."
-        )
+        # --- Methodology ---
+        with st.expander("Metodologi Klasifikasi", expanded=False):
+            st.markdown("""
+Setiap pasangan dokumen yang terhubung di Neo4j (melalui relasi **CITES** atau **HIGHER**)
+dianalisis oleh LLM (GPT-4.1) menggunakan kerangka hukum tata negara Indonesia.
+
+| Label | Deskripsi | Kriteria |
+|-------|-----------|----------|
+| **ENTAILMENT** | Regulasi saling mendukung / komplementer | Hubungan delegasi/atribusi, konsistensi substansial, keselarasan asas (UU &rarr; PP &rarr; Permen &rarr; SK) |
+| **CONTRADICTION** | Regulasi bertentangan / disharmoni | Benturan kewenangan, pertentangan hak & kewajiban, inkonsistensi terminologi, pelanggaran hierarki (Lex Superior / Lex Specialis / Lex Posterior) |
+| **NEUTRAL** | Tidak ada hubungan substantif | Yurisdiksi terpisah, substansi eksklusif, tidak ada persinggungan normatif |
+
+Setiap klasifikasi **wajib menyebutkan Pasal dan Ayat spesifik** dari masing-masing dokumen
+sebagai dasar penentuan label.
+            """)
 
         df_kaus = pd.read_csv(_kausalitas_result_path)
 
-        # Summary metrics
-        if os.path.isfile(_kausalitas_summary_path):
-            df_ks = pd.read_csv(_kausalitas_summary_path)
-            ks_dict = dict(zip(df_ks["Metric"], df_ks["Value"]))
-        else:
-            # Compute from data
-            ks_dict = {
-                "CONTRADICTION": int((df_kaus["Kausalitas"] == "CONTRADICTION").sum()),
-                "ENTAILMENT": int((df_kaus["Kausalitas"] == "ENTAILMENT").sum()),
-                "NEUTRAL": int((df_kaus["Kausalitas"] == "NEUTRAL").sum()),
-            }
+        # --- Compute counts ---
+        n_entailment = int((df_kaus["Kausalitas"] == "ENTAILMENT").sum())
+        n_contradiction = int((df_kaus["Kausalitas"] == "CONTRADICTION").sum())
+        n_neutral = int((df_kaus["Kausalitas"] == "NEUTRAL").sum())
+        n_error = int((df_kaus["Kausalitas"] == "Error").sum())
+        n_total = len(df_kaus)
 
+        # --- KPI Cards (HTML) ---
         section_divider("Ringkasan")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("CONTRADICTION", ks_dict.get("CONTRADICTION", 0))
-        c2.metric("ENTAILMENT", ks_dict.get("ENTAILMENT", 0))
-        c3.metric("NEUTRAL", ks_dict.get("NEUTRAL", 0))
+        st.markdown(f"""
+        <div class="kpi-row">
+            <div class="kpi-card kpi-entailment">
+                <div class="kpi-label">Entailment</div>
+                <div class="kpi-value">{n_entailment}</div>
+            </div>
+            <div class="kpi-card kpi-contradiction">
+                <div class="kpi-label">Contradiction</div>
+                <div class="kpi-value">{n_contradiction}</div>
+            </div>
+            <div class="kpi-card kpi-neutral">
+                <div class="kpi-label">Neutral</div>
+                <div class="kpi-value">{n_neutral}</div>
+            </div>
+            <div class="kpi-card kpi-total">
+                <div class="kpi-label">Total Pasangan</div>
+                <div class="kpi-value">{n_total}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.caption(f"{len(df_kaus)} pasangan dokumen")
+        # --- Distribution Chart (Altair) ---
+        _label_order = ["CONTRADICTION", "ENTAILMENT", "NEUTRAL"]
+        _label_colors = ["#dc2626", "#059669", "#94a3b8"]
+        _chart_data = pd.DataFrame({
+            "Label": ["CONTRADICTION", "ENTAILMENT", "NEUTRAL"],
+            "Count": [n_contradiction, n_entailment, n_neutral],
+        })
 
+        _bar_chart = (
+            alt.Chart(_chart_data)
+            .mark_bar(cornerRadiusEnd=6, height=28)
+            .encode(
+                x=alt.X("Count:Q", title="Jumlah Pasangan", axis=alt.Axis(tickMinStep=1)),
+                y=alt.Y("Label:N", title=None, sort=_label_order,
+                         axis=alt.Axis(labelFontSize=12, labelFontWeight="bold")),
+                color=alt.Color("Label:N", scale=alt.Scale(
+                    domain=_label_order, range=_label_colors
+                ), legend=None),
+                tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Count:Q", title="Jumlah")],
+            )
+            .properties(height=140)
+            .configure_view(strokeWidth=0)
+            .configure_axis(grid=False)
+        )
+        st.altair_chart(_bar_chart, use_container_width=True)
+
+        # --- Filter Bar ---
         section_divider("Hasil Analisis")
 
-        def color_kausalitas(val):
-            colors = {
-                "CONTRADICTION": "background-color: #fee2e2; color: #dc2626;",
-                "ENTAILMENT": "background-color: #d1fae5; color: #059669;",
-                "NEUTRAL": "background-color: #f1f5f9; color: #6b7280;",
-                "Error": "background-color: #fef3c7; color: #d97706;",
-            }
-            return colors.get(val, "")
+        _filter_col1, _filter_col2 = st.columns([1, 2])
+        with _filter_col1:
+            _label_options = ["Semua", "ENTAILMENT", "CONTRADICTION", "NEUTRAL", "Error"]
+            _selected_label = st.selectbox("Filter label", _label_options, index=0, label_visibility="collapsed")
+        with _filter_col2:
+            _search_query = st.text_input("Cari dokumen", placeholder="Ketik nama dokumen ...", label_visibility="collapsed")
 
-        styled = df_kaus.style.map(color_kausalitas, subset=["Kausalitas"])
+        # Apply filters
+        df_display = df_kaus.copy()
+        if _selected_label != "Semua":
+            df_display = df_display[df_display["Kausalitas"] == _selected_label]
+        if _search_query.strip():
+            _q = _search_query.strip().lower()
+            df_display = df_display[
+                df_display["Dokumen_Sumber"].str.lower().str.contains(_q, na=False)
+                | df_display["Dokumen_Pembanding"].str.lower().str.contains(_q, na=False)
+            ]
+
+        st.caption(f"Menampilkan {len(df_display)} dari {n_total} pasangan dokumen")
+
+        # --- Color-coded table ---
+        def _color_kausalitas(val):
+            _colors = {
+                "CONTRADICTION": "background-color: #fee2e2; color: #dc2626; font-weight: 600;",
+                "ENTAILMENT": "background-color: #d1fae5; color: #059669; font-weight: 600;",
+                "NEUTRAL": "background-color: #f1f5f9; color: #64748b; font-weight: 600;",
+                "Error": "background-color: #fef3c7; color: #d97706; font-weight: 600;",
+            }
+            return _colors.get(val, "")
+
+        # Sort: CONTRADICTION first, then ENTAILMENT, then NEUTRAL, then Error
+        _sort_map = {"CONTRADICTION": 0, "ENTAILMENT": 1, "NEUTRAL": 2, "Error": 3}
+        df_display = df_display.copy()
+        df_display["_sort"] = df_display["Kausalitas"].map(_sort_map).fillna(9)
+        df_display = df_display.sort_values("_sort").drop(columns=["_sort"])
+
+        df_show = df_display.rename(columns={
+            "Dokumen_Sumber": "Dokumen Sumber",
+            "Dokumen_Pembanding": "Dokumen Pembanding",
+            "Tipe_Relasi": "Tipe Relasi",
+        })
+
+        styled = df_show.style.map(_color_kausalitas, subset=["Kausalitas"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # --- Download filtered CSV ---
+        _csv_export = df_display.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download hasil (CSV)",
+            data=_csv_export,
+            file_name="kausalitas_filtered.csv",
+            mime="text/csv",
+        )
+
+        # --- Detail cards with reasoning + Pasal highlighting ---
+        section_divider("Detail Alasan per Pasangan")
+
+        _badge_html_map = {
+            "ENTAILMENT": '<span class="stance-supports">ENTAILMENT</span>',
+            "CONTRADICTION": '<span class="stance-contradicts">CONTRADICTION</span>',
+            "NEUTRAL": '<span class="stance-neutral">NEUTRAL</span>',
+            "Error": '<span class="stance-neutral">ERROR</span>',
+        }
+
+        def _highlight_pasal(text: str) -> str:
+            """Wrap Pasal/Ayat references in <mark> tags for visual emphasis."""
+            if not isinstance(text, str):
+                return str(text)
+            return re.sub(
+                r'(Pasal\s+\d+[A-Za-z]*(?:\s+ayat\s*\(\d+\))?)',
+                r'<mark class="pasal-ref">\1</mark>',
+                text,
+                flags=re.IGNORECASE,
+            )
+
+        for _idx, _row in df_display.iterrows():
+            _label = _row["Kausalitas"]
+            _src = _row["Dokumen_Sumber"]
+            _tgt = _row["Dokumen_Pembanding"]
+            _rel = _row.get("Tipe_Relasi", "")
+            _alasan = _row.get("Alasan", "")
+
+            with st.expander(f"{_label}  |  {_src}  \u2192  {_tgt}", expanded=False):
+                _badge = _badge_html_map.get(_label, _badge_html_map["Error"])
+                st.markdown(
+                    f'<div class="detail-card">'
+                    f'  <div class="detail-card-header">'
+                    f'    <span class="detail-card-docs">{_src}</span>'
+                    f'    <span class="detail-card-arrow">\u2192</span>'
+                    f'    <span class="detail-card-docs">{_tgt}</span>'
+                    f'    {_badge}'
+                    f'    <span class="detail-card-rel">{_rel}</span>'
+                    f'  </div>'
+                    f'  <div class="detail-card-reason">{_highlight_pasal(_alasan)}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # -- Footer -------------------------------------------------------------------
