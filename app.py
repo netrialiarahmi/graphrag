@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import os, re, glob
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 
 # -- Page Config ---------------------------------------------------------------
@@ -486,6 +487,11 @@ if "search_doc_ids" not in st.session_state:
     st.session_state.search_doc_ids = []
 if "selected_node" not in st.session_state:
     st.session_state.selected_node = None
+if "search_answer" not in st.session_state:
+    st.session_state.search_answer = None
+if "search_context_docs" not in st.session_state:
+    st.session_state.search_context_docs = {}
+# (benchmark_results and causality_results are now stored as CSV files in output/)
 
 # -- Connection checks (cached per session) ------------------------------------
 neo4j_ok = neo4j_client.test_connection()
@@ -561,187 +567,142 @@ def render_stance_row(src: str, tgt: str, stance_result: dict):
     """, unsafe_allow_html=True)
 
 
-# -- Main Navigation Tabs ------------------------------------------------------
-tab_search, tab_browse, tab_compare = st.tabs(["Search & Discover", "Browse Graph", "Compare Documents"])
+# ── Benchmark helpers — imported from shared module ──────────────────────────
+from utils.benchmark_helpers import (
+    extract_documents as _extract_documents,
+    get_correct_doc_id as _get_correct_doc_id,
+    get_unique_doc_ids as _get_unique_doc_ids,
+)
+
+
+# -- Main Navigation Tabs (4 tabs) --------------------------------------------
+tab_search, tab_browse, tab_compare, tab_kausalitas = st.tabs(
+    ["Search & Discover", "Browse Graph", "Compare Documents", "Kausalitas"]
+)
 
 
 # ==============================================================================
 # TAB 1: Search & Discover
 # ==============================================================================
 with tab_search:
-    section_divider("Search")
+    section_divider("Tanya Jawab Regulasi")
 
-    # Inline settings row
-    s_col1, s_col2, s_col3, s_col4 = st.columns([5, 1, 1.5, 1.5])
-    with s_col1:
-        query = st.text_input(
-            "Search query",
-            placeholder="Search Indonesian legal documents ...",
-            label_visibility="collapsed",
-        )
-    with s_col2:
-        top_k = st.number_input("Results", min_value=5, max_value=50, value=10, key="search_topk")
-    with s_col3:
-        scope_filter = st.selectbox("Scope", ["all", "pasal", "ayat", "diktum"], key="search_scope")
-    with s_col4:
-        enable_stance = st.checkbox("Stance detection", value=True, key="search_stance")
+    query = st.text_input(
+        "Pertanyaan",
+        placeholder="Ketik pertanyaan tentang regulasi Indonesia ...",
+        label_visibility="collapsed",
+        key="search_query",
+    )
 
-    search_btn = st.button("Search", type="primary", key="search_btn")
+    search_btn = st.button("Cari & Jawab", type="primary", key="search_btn")
 
     if query and search_btn:
-        with st.spinner("Searching relevant documents ..."):
+        with st.spinner("Mencari dokumen relevan ..."):
             try:
+                # 1. Embed query via HuggingFace Indo-LegalBERT
                 query_embedding = llm_stance.get_embedding(query)
-                results = pinecone_client.semantic_search(
+
+                # 2. Search VDB with high top_k to get 3 unique doc_ids
+                raw_results = pinecone_client.semantic_search(
                     query_embedding=query_embedding,
-                    top_k=top_k,
-                    scope_filter=scope_filter if scope_filter != "all" else None,
+                    top_k=30,
                 )
-                st.session_state.search_results = results
-            except Exception:
-                st.info("Embedding model unavailable. Falling back to metadata search.")
-                try:
-                    all_docs = neo4j_client.get_all_documents()
-                    query_lower = query.lower()
-                    matching_docs = [
-                        d for d in all_docs
-                        if query_lower in str(d.get("judul", "")).lower()
-                        or query_lower in str(d.get("doc_id", "")).lower()
-                        or query_lower in str(d.get("jenis", "")).lower()
-                    ]
-                    results = []
-                    for doc in matching_docs[:5]:
-                        chunks = pinecone_client.fetch_by_doc_id(doc["doc_id"], top_k=5)
-                        results.extend(chunks)
-                    if not results:
-                        for doc in all_docs[:3]:
-                            chunks = pinecone_client.fetch_by_doc_id(doc["doc_id"], top_k=3)
-                            results.extend(chunks)
-                    st.session_state.search_results = results
-                except Exception as e2:
-                    st.error(f"Search failed: {e2}")
-                    st.session_state.search_results = []
 
-            # Extract top 5 unique doc_ids (preserving relevance order)
-            raw = st.session_state.search_results
-            unique_ids: list[str] = list(dict.fromkeys(r["doc_id"] for r in raw if r.get("doc_id")))[:5]
-            st.session_state.search_doc_ids = unique_ids
+                # 3. Get 3 unique doc_ids
+                primary_doc_ids = _get_unique_doc_ids(raw_results, 3)
 
-    # Display search results
-    results = st.session_state.search_results
-    doc_ids = st.session_state.search_doc_ids
+                if not primary_doc_ids:
+                    st.warning("Tidak ditemukan dokumen yang relevan.")
+                    st.stop()
 
-    if results and doc_ids:
-        # Stats bar
+                st.session_state.search_doc_ids = primary_doc_ids
+                st.session_state.search_results = raw_results
+
+                # 4. Fetch ALL chunks for each primary doc
+                all_context_chunks = []
+                context_docs = {}  # doc_id -> {source: "VDB", chunks: [...]}
+
+                for did in primary_doc_ids:
+                    chunks = pinecone_client.fetch_by_doc_id(did, top_k=100)
+                    context_docs[did] = {"source": "VDB (Primary)", "chunks": chunks}
+                    all_context_chunks.extend(chunks)
+
+                # 5. For each primary doc, find up to 3 related docs in Neo4j
+                related_doc_ids = []
+                if neo4j_ok:
+                    for did in primary_doc_ids:
+                        related = neo4j_client.get_related_documents(did, limit=3)
+                        for rdoc in related:
+                            rdid = rdoc.get("doc_id", "")
+                            if rdid and rdid not in primary_doc_ids and rdid not in related_doc_ids:
+                                related_doc_ids.append(rdid)
+
+                # 6. Fetch content for related docs
+                for rdid in related_doc_ids:
+                    chunks = pinecone_client.fetch_by_doc_id(rdid, top_k=50)
+                    if chunks:
+                        context_docs[rdid] = {"source": "Neo4j (Related)", "chunks": chunks}
+                        all_context_chunks.extend(chunks)
+
+                st.session_state.search_context_docs = context_docs
+
+                # 7. Build combined context and generate answer
+                with st.spinner("Menghasilkan jawaban dengan GPT ..."):
+                    answer = llm_stance.ask_about_documents(query, all_context_chunks[:20])
+                    st.session_state.search_answer = answer
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+                st.session_state.search_answer = None
+
+    # Display answer
+    if st.session_state.search_answer:
+        section_divider("Jawaban")
+        st.markdown(st.session_state.search_answer)
+
+    # Display source documents
+    context_docs = st.session_state.search_context_docs
+    if context_docs:
+        section_divider("Dokumen Sumber")
+
+        # Stats
+        n_primary = sum(1 for v in context_docs.values() if "Primary" in v["source"])
+        n_related = sum(1 for v in context_docs.values() if "Related" in v["source"])
+        total_chunks = sum(len(v["chunks"]) for v in context_docs.values())
+
         st.markdown(
             f'<div style="display:flex;gap:10px;margin:0.5rem 0 0.75rem;">'
-            f'<span class="stat-pill"><span class="stat-pill-count">{len(doc_ids)}</span> documents</span>'
-            f'<span class="stat-pill"><span class="stat-pill-count">{len(results)}</span> chunks</span>'
+            f'<span class="stat-pill"><span class="stat-pill-count">{n_primary}</span> dokumen VDB</span>'
+            f'<span class="stat-pill"><span class="stat-pill-count">{n_related}</span> dokumen terkait (Neo4j)</span>'
+            f'<span class="stat-pill"><span class="stat-pill-count">{total_chunks}</span> total chunks</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-        # Build a doc_id -> judul lookup from Neo4j
-        all_docs_cache = neo4j_client.get_all_documents() if neo4j_ok else []
-        judul_map = {d.get("doc_id", ""): d.get("judul", "") for d in all_docs_cache}
-
-        # Show document-level cards (grouped by doc_id)
-        for did in doc_ids:
-            judul = judul_map.get(did, "")
-            chunks_for_doc = [r for r in results if r.get("doc_id") == did]
-            best = chunks_for_doc[0] if chunks_for_doc else {}
-            score = best.get("score")
-
-            title_display = f"{did}"
-            if judul:
-                title_display += f" -- {judul[:80]}"
-
-            with st.expander(title_display, expanded=False):
-                if score:
-                    st.caption(f"Top score: {score:.4f} | {len(chunks_for_doc)} chunks matched")
-                for i, ch in enumerate(chunks_for_doc[:5]):
+        for did, info in context_docs.items():
+            with st.expander(f"{did}  [{info['source']}] — {len(info['chunks'])} chunks"):
+                for ch in info["chunks"][:5]:
                     render_result_card(
-                        doc_id=ch["doc_id"],
+                        doc_id=ch.get("doc_id", ""),
                         scope=ch.get("scope", "?"),
                         content=ch.get("content", ""),
                         score=ch.get("score"),
                         article_id=ch.get("article_id", ""),
                     )
 
-        # --- Document relationship graph (only the 5 docs + edges between them) ---
-        if len(doc_ids) >= 2 and neo4j_ok:
-            section_divider("Document Relationships")
-
-            graph_data = neo4j_client.get_edges_between(doc_ids)
-            graph_nodes = graph_data["nodes"]
-            graph_edges = graph_data["edges"]
-
-            if graph_nodes:
-                st.markdown(
-                    f'<div style="display:flex;gap:10px;margin-bottom:0.5rem;">'
-                    f'<span class="stat-pill"><span class="stat-pill-count">{len(graph_nodes)}</span> documents</span>'
-                    f'<span class="stat-pill"><span class="stat-pill-count">{len(graph_edges)}</span> relationships</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-                # Stance detection on edges
-                stance_map = {}
-                if enable_stance and graph_edges:
-                    with st.spinner("Analyzing document relationships ..."):
-                        for edge in graph_edges:
-                            if edge.get("type") in ("CITES", "HIGHER"):
-                                src_id = edge.get("source_id", "")
-                                tgt_id = edge.get("target_id", "")
-                                cache_key = (src_id, tgt_id)
-
-                                if cache_key not in st.session_state.stance_cache:
-                                    src_chunks = [r for r in results if r.get("doc_id") == src_id]
-                                    tgt_chunks = [r for r in results if r.get("doc_id") == tgt_id]
-                                    if not src_chunks:
-                                        src_chunks = pinecone_client.fetch_by_doc_id(src_id, top_k=3)
-                                    if not tgt_chunks:
-                                        tgt_chunks = pinecone_client.fetch_by_doc_id(tgt_id, top_k=3)
-
-                                    text_a = "\n".join(c.get("content", "") for c in src_chunks[:3])
-                                    text_b = "\n".join(c.get("content", "") for c in tgt_chunks[:3])
-
-                                    if text_a and text_b:
-                                        sr = llm_stance.classify_stance(text_a, text_b, src_id, tgt_id)
-                                        st.session_state.stance_cache[cache_key] = sr
-
-                                if cache_key in st.session_state.stance_cache:
-                                    stance_map[cache_key] = st.session_state.stance_cache[cache_key]
-
+        # Show relationship graph between source docs
+        all_source_ids = list(context_docs.keys())
+        if len(all_source_ids) >= 2 and neo4j_ok:
+            section_divider("Hubungan Antar Dokumen")
+            graph_data = neo4j_client.get_edges_between(all_source_ids)
+            if graph_data["nodes"]:
                 st.markdown('<div class="graph-container">', unsafe_allow_html=True)
-                selected = graph_viz.render_document_graph(
-                    doc_nodes=graph_nodes,
-                    doc_edges=graph_edges,
-                    stance_map=stance_map,
-                    height=450,
+                graph_viz.render_document_graph(
+                    doc_nodes=graph_data["nodes"],
+                    doc_edges=graph_data["edges"],
+                    height=400,
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
-
-                if selected:
-                    st.session_state.selected_node = selected
-
-                # Stance summary
-                if stance_map:
-                    section_divider("Stance Analysis")
-                    for (src, tgt), sr in stance_map.items():
-                        render_stance_row(src, tgt, sr)
-
-        # Q&A section
-        section_divider("Q&A")
-        qa_query = st.text_input(
-            "Ask a question about the documents found",
-            key="qa_input",
-            placeholder="What are the key provisions regarding ...",
-        )
-        if qa_query and st.button("Submit", key="qa_btn"):
-            with st.spinner("Generating answer ..."):
-                answer = llm_stance.ask_about_documents(qa_query, results[:5])
-                st.markdown(answer)
 
 
 # ==============================================================================
@@ -749,347 +710,184 @@ with tab_search:
 # ==============================================================================
 with tab_browse:
     if not neo4j_ok:
-        st.error("Neo4j is not connected. Check your configuration.")
+        st.error("Neo4j tidak terhubung. Periksa konfigurasi.")
     else:
-        all_docs = neo4j_client.get_all_documents()
+        section_divider("Graph Dokumen")
 
-        if not all_docs:
-            st.warning("No documents found in the database.")
+        with st.spinner("Memuat graph ..."):
+            overview = neo4j_client.get_graph_overview()
+
+        if overview["nodes"]:
+            st.markdown(
+                f'<div style="display:flex;gap:10px;margin:0.5rem 0;">'
+                f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["nodes"])}</span> dokumen</span>'
+                f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["edges"])}</span> relasi</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown('<div class="graph-container">', unsafe_allow_html=True)
+            selected = graph_viz.render_document_graph(
+                doc_nodes=overview["nodes"],
+                doc_edges=overview["edges"],
+                height=600,
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if selected:
+                st.session_state.selected_node = selected
+
+            # Show selected node detail
+            if st.session_state.selected_node:
+                sel_id = st.session_state.selected_node
+                section_divider(f"Detail: {sel_id}")
+                detail = neo4j_client.get_document_detail(sel_id)
+                if detail and detail.get("document"):
+                    doc = detail["document"]
+                    if doc.get("judul"):
+                        st.markdown(f"**{doc['judul']}**")
+                    meta_fields = [
+                        ("jenis", "Jenis"), ("tahun", "Tahun"),
+                        ("nomor", "Nomor"), ("pembentuk", "Pembentuk"),
+                    ]
+                    cols = st.columns(len(meta_fields))
+                    for col, (key, label) in zip(cols, meta_fields):
+                        val = doc.get(key)
+                        if val:
+                            col.metric(label, str(val))
         else:
-            doc_options = [d.get("doc_id", "?") for d in all_docs]
-            doc_labels = {
-                d.get("doc_id", "?"): f"{d.get('doc_id', '?')} -- {d.get('judul', '')[:60]}"
-                for d in all_docs
-            }
-
-            # Inline settings row
-            b_col1, b_col2, b_col3 = st.columns([5, 1.2, 2])
-            with b_col1:
-                selected_doc = st.selectbox(
-                    "Select document",
-                    doc_options,
-                    format_func=lambda x: doc_labels.get(x, x),
-                    key="browse_doc",
-                    label_visibility="collapsed",
-                )
-            with b_col2:
-                k_hops = st.number_input("Hops", min_value=1, max_value=4, value=2, key="browse_hops")
-            with b_col3:
-                b_stance = st.checkbox("Enable stance detection", value=True, key="browse_stance_chk")
-
-            if selected_doc:
-                tab_sub, tab_detail = st.tabs(["Subgraph", "Document Detail"])
-
-                with tab_sub:
-                    with st.spinner("Loading subgraph ..."):
-                        subgraph = neo4j_client.get_citing_documents(selected_doc, hops=k_hops)
-
-                    if subgraph["nodes"]:
-                        st.markdown(
-                            f'<div style="display:flex;gap:10px;margin:0.5rem 0;">'
-                            f'<span class="stat-pill"><span class="stat-pill-count">{len(subgraph["nodes"])}</span> documents</span>'
-                            f'<span class="stat-pill"><span class="stat-pill-count">{len(subgraph["edges"])}</span> relationships</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                        stance_map = {}
-
-                        # On-demand stance analysis
-                        if b_stance and subgraph["edges"]:
-                            if st.button("Analyze Stance", key="browse_analyze"):
-                                with st.spinner("Analyzing stances ..."):
-                                    for edge in subgraph["edges"]:
-                                        if edge.get("type") in ("CITES", "HIGHER"):
-                                            src_id = edge.get("source_id", "")
-                                            tgt_id = edge.get("target_id", "")
-                                            cache_key = (src_id, tgt_id)
-
-                                            if cache_key not in st.session_state.stance_cache:
-                                                src_chunks = pinecone_client.fetch_by_doc_id(src_id, top_k=3)
-                                                tgt_chunks = pinecone_client.fetch_by_doc_id(tgt_id, top_k=3)
-                                                text_a = "\n".join(c.get("content", "") for c in src_chunks[:3])
-                                                text_b = "\n".join(c.get("content", "") for c in tgt_chunks[:3])
-                                                if text_a and text_b:
-                                                    r = llm_stance.classify_stance(text_a, text_b, src_id, tgt_id)
-                                                    st.session_state.stance_cache[cache_key] = r
-
-                                            if cache_key in st.session_state.stance_cache:
-                                                stance_map[cache_key] = st.session_state.stance_cache[cache_key]
-
-                        # Use cached stances
-                        for edge in subgraph.get("edges", []):
-                            ckey = (edge.get("source_id", ""), edge.get("target_id", ""))
-                            if ckey in st.session_state.stance_cache:
-                                stance_map[ckey] = st.session_state.stance_cache[ckey]
-
-                        st.markdown('<div class="graph-container">', unsafe_allow_html=True)
-                        selected = graph_viz.render_document_graph(
-                            doc_nodes=subgraph["nodes"],
-                            doc_edges=subgraph["edges"],
-                            stance_map=stance_map,
-                            height=500,
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                        if selected:
-                            st.session_state.selected_node = selected
-
-                        # Stance results
-                        if stance_map:
-                            section_divider("Stance Results")
-                            for (src, tgt), sr in stance_map.items():
-                                render_stance_row(src, tgt, sr)
-
-                    else:
-                        st.info("This document has no CITES/HIGHER relationships with other documents.")
-
-                with tab_detail:
-                    with st.spinner("Loading document details ..."):
-                        detail = neo4j_client.get_document_detail(selected_doc)
-
-                    if detail and detail.get("document"):
-                        doc = detail["document"]
-                        st.markdown(f"### {doc.get('doc_id', selected_doc)}")
-                        if doc.get("judul"):
-                            st.markdown(f"**{doc['judul']}**")
-
-                        # Metadata grid
-                        meta_fields = [
-                            ("jenis", "Type"), ("tahun", "Year"),
-                            ("nomor", "Number"), ("pembentuk", "Issuer"),
-                        ]
-                        cols = st.columns(len(meta_fields))
-                        for col, (key, label) in zip(cols, meta_fields):
-                            val = doc.get(key)
-                            if val:
-                                col.metric(label, str(val))
-
-                        # Konsideran
-                        if doc.get("konsideran_menimbang"):
-                            with st.expander("Considering (Menimbang)"):
-                                items = doc["konsideran_menimbang"]
-                                if isinstance(items, list):
-                                    for item in items:
-                                        st.markdown(f"- {item}")
-                                else:
-                                    st.text(str(items))
-
-                        if doc.get("konsideran_mengingat"):
-                            with st.expander("Referring to (Mengingat)"):
-                                items = doc["konsideran_mengingat"]
-                                if isinstance(items, list):
-                                    for item in items:
-                                        st.markdown(f"- {item}")
-                                else:
-                                    st.text(str(items))
-
-                        # Pasals
-                        if detail.get("pasals"):
-                            section_divider(f"Articles / Pasal ({len(detail['pasals'])})")
-                            for p in detail["pasals"]:
-                                name = p.get("name", "?")
-                                content = p.get("content", "")
-                                bab = p.get("bab_title", "")
-                                lbl = name
-                                if bab:
-                                    lbl += f" -- {bab}"
-                                with st.expander(lbl):
-                                    if content:
-                                        st.text(content)
-                                    if p.get("penjelasan") and p["penjelasan"] != "Tidak ada Penjelasan":
-                                        st.caption(f"Explanation: {p['penjelasan']}")
-
-                        # Ayats
-                        if detail.get("ayats"):
-                            section_divider(f"Verses / Ayat ({len(detail['ayats'])})")
-                            for a in detail["ayats"]:
-                                name = a.get("name", "?")
-                                pasal = a.get("pasal_name", "")
-                                content = a.get("content", "")
-                                with st.expander(f"{pasal} > {name}" if pasal else name):
-                                    if content:
-                                        st.text(content)
-
-                        # Diktums
-                        if detail.get("diktums"):
-                            section_divider(f"Diktum ({len(detail['diktums'])})")
-                            for dk in detail["diktums"]:
-                                name = dk.get("name", "?")
-                                content = dk.get("content", "")
-                                with st.expander(name):
-                                    if content:
-                                        st.text(content)
-                    else:
-                        st.warning("Document details not found.")
-
-        # Full graph overview
-        st.markdown("---")
-        if st.checkbox("Show full document graph", key="full_graph"):
-            with st.spinner("Loading graph ..."):
-                overview = neo4j_client.get_graph_overview()
-            if overview["nodes"]:
-                st.markdown(
-                    f'<div style="display:flex;gap:10px;margin-bottom:0.5rem;">'
-                    f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["nodes"])}</span> documents</span>'
-                    f'<span class="stat-pill"><span class="stat-pill-count">{len(overview["edges"])}</span> relationships</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown('<div class="graph-container">', unsafe_allow_html=True)
-                graph_viz.render_document_graph(
-                    doc_nodes=overview["nodes"],
-                    doc_edges=overview["edges"],
-                    height=600,
-                )
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.info("Tidak ada dokumen dalam database Neo4j.")
 
 
 # ==============================================================================
-# TAB 3: Compare Documents
+# TAB 3: Compare Documents (IR Benchmark) — read-only from output/retrieval/
 # ==============================================================================
 with tab_compare:
-    if not neo4j_ok:
-        st.error("Neo4j is not connected. Check your configuration.")
+    section_divider("Information Retrieval Benchmark")
+
+    import pandas as pd
+
+    _detail_dir = os.path.join(os.path.dirname(__file__), "output", "retrieval", "detailed retrieval")
+    _metrics_dir = os.path.join(os.path.dirname(__file__), "output", "retrieval", "metrics")
+    _benchmark_csvs = sorted(glob.glob(os.path.join(_detail_dir, "*_v3.csv"))) if os.path.isdir(_detail_dir) else []
+
+    if not _benchmark_csvs:
+        st.info(
+            "Belum ada hasil benchmark.  "
+            "Jalankan di terminal:  \n"
+            "```bash\npython run_benchmark_v3.py\n```"
+        )
     else:
-        all_docs_cmp = neo4j_client.get_all_documents()
-        doc_options_cmp = [d.get("doc_id", "?") for d in all_docs_cmp]
-        doc_labels_cmp = {
-            d.get("doc_id", "?"): f"{d.get('doc_id', '?')} -- {d.get('judul', '')[:60]}"
-            for d in all_docs_cmp
-        }
+        _bm_labels = {f: os.path.basename(f) for f in _benchmark_csvs}
+        _selected_bm = st.selectbox(
+            "Pilih hasil benchmark",
+            _benchmark_csvs,
+            format_func=lambda x: _bm_labels[x],
+            key="benchmark_csv_select",
+        )
 
-        if len(doc_options_cmp) < 2:
-            st.warning("At least 2 documents are required for comparison.")
+        if _selected_bm:
+            df_bm = pd.read_csv(_selected_bm)
+
+            # Load summary from metrics/ directory
+            _base = os.path.basename(_selected_bm).replace("_v3.csv", "_v3_summary.csv")
+            _summary_path = os.path.join(_metrics_dir, _base)
+            if os.path.isfile(_summary_path):
+                df_summary = pd.read_csv(_summary_path)
+                summary_dict = dict(zip(df_summary["Metric"], df_summary["Value"]))
+
+                section_divider("Rata-rata Skor")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Avg Recall GraphRAG", f"{float(summary_dict.get('Avg_Recall_GraphRAG', 0)):.2%}")
+                m2.metric("Avg Precision GraphRAG", f"{float(summary_dict.get('Avg_Precision_GraphRAG', 0)):.2%}")
+                m3.metric("Avg Recall VDB", f"{float(summary_dict.get('Avg_Recall_VDB', 0)):.2%}")
+                m4.metric("Avg Precision VDB", f"{float(summary_dict.get('Avg_Precision_VDB', 0)):.2%}")
+
+                total_q = summary_dict.get("Total_Questions", "?")
+                scored_q = summary_dict.get("Scored_Questions", "")
+                skipped_q = summary_dict.get("Skipped_Questions", "")
+                elapsed = summary_dict.get("Elapsed_Seconds", "?")
+                if scored_q:
+                    st.caption(f"{total_q} pertanyaan ({scored_q} scored, {skipped_q} skipped)  ·  {elapsed}s")
+                elif "Total_Questions" in summary_dict:
+                    st.caption(f"{total_q} pertanyaan  ·  {elapsed}s")
+
+            section_divider("Hasil Per Pertanyaan")
+
+            # Format numeric columns as percentages for display
+            display_df = df_bm.copy()
+            for col in ["Recall_GraphRAG", "Precision_GraphRAG", "Recall_VDB", "Precision_VDB"]:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(
+                        lambda v: f"{float(v):.2%}" if pd.notna(v) else "—"
+                    )
+
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+
+# ==============================================================================
+# TAB 4: Kausalitas — read-only from output/kausalitas/
+# ==============================================================================
+with tab_kausalitas:
+    section_divider("Analisis Kausalitas Antar Dokumen")
+
+    _kausalitas_result_path = os.path.join(os.path.dirname(__file__), "output", "kausalitas", "kausalitas_results.csv")
+    _kausalitas_summary_path = os.path.join(os.path.dirname(__file__), "output", "kausalitas", "kausalitas_summary.csv")
+
+    if not os.path.isfile(_kausalitas_result_path):
+        st.info(
+            "Belum ada hasil analisis kausalitas.  "
+            "Jalankan di terminal:  \n"
+            "```bash\npython run_kausalitas.py\n```"
+        )
+    else:
+        st.markdown(
+            "Menampilkan hasil analisis kausalitas (ENTAILMENT / CONTRADICTION / NEUTRAL) "
+            "untuk semua pasangan dokumen yang terhubung di Neo4j."
+        )
+
+        df_kaus = pd.read_csv(_kausalitas_result_path)
+
+        # Summary metrics
+        if os.path.isfile(_kausalitas_summary_path):
+            df_ks = pd.read_csv(_kausalitas_summary_path)
+            ks_dict = dict(zip(df_ks["Metric"], df_ks["Value"]))
         else:
-            cmp_col1, cmp_col2, cmp_col3 = st.columns([4, 4, 2])
+            # Compute from data
+            ks_dict = {
+                "CONTRADICTION": int((df_kaus["Kausalitas"] == "CONTRADICTION").sum()),
+                "ENTAILMENT": int((df_kaus["Kausalitas"] == "ENTAILMENT").sum()),
+                "NEUTRAL": int((df_kaus["Kausalitas"] == "NEUTRAL").sum()),
+            }
 
-            with cmp_col1:
-                doc_a = st.selectbox(
-                    "Document A", doc_options_cmp, index=0, key="compare_a",
-                    format_func=lambda x: doc_labels_cmp.get(x, x),
-                )
-            with cmp_col2:
-                default_b = 1 if len(doc_options_cmp) > 1 else 0
-                doc_b = st.selectbox(
-                    "Document B", doc_options_cmp, index=default_b, key="compare_b",
-                    format_func=lambda x: doc_labels_cmp.get(x, x),
-                )
-            with cmp_col3:
-                st.markdown("<br>", unsafe_allow_html=True)
-                compare_btn = st.button("Compare", type="primary", key="compare_btn")
+        section_divider("Ringkasan")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("CONTRADICTION", ks_dict.get("CONTRADICTION", 0))
+        c2.metric("ENTAILMENT", ks_dict.get("ENTAILMENT", 0))
+        c3.metric("NEUTRAL", ks_dict.get("NEUTRAL", 0))
 
-            if doc_a and doc_b and doc_a != doc_b:
-                if compare_btn:
-                    col_left, col_right = st.columns(2)
+        st.caption(f"{len(df_kaus)} pasangan dokumen")
 
-                    with st.spinner("Loading documents ..."):
-                        detail_a = neo4j_client.get_document_detail(doc_a)
-                        detail_b = neo4j_client.get_document_detail(doc_b)
+        section_divider("Hasil Analisis")
 
-                    with st.spinner("Fetching content from Pinecone ..."):
-                        chunks_a = pinecone_client.fetch_by_doc_id(doc_a, top_k=20)
-                        chunks_b = pinecone_client.fetch_by_doc_id(doc_b, top_k=20)
+        def color_kausalitas(val):
+            colors = {
+                "CONTRADICTION": "background-color: #fee2e2; color: #dc2626;",
+                "ENTAILMENT": "background-color: #d1fae5; color: #059669;",
+                "NEUTRAL": "background-color: #f1f5f9; color: #6b7280;",
+                "Error": "background-color: #fef3c7; color: #d97706;",
+            }
+            return colors.get(val, "")
 
-                    with col_left:
-                        st.markdown(f"### {doc_a}")
-                        if detail_a and detail_a.get("document"):
-                            d = detail_a["document"]
-                            if d.get("judul"):
-                                st.markdown(f"**{d['judul']}**")
-                            st.caption(f"{d.get('jenis', '')} | Year {d.get('tahun', '')} | No. {d.get('nomor', '')}")
-
-                        st.markdown(
-                            f'<span class="stat-pill"><span class="stat-pill-count">{len(chunks_a)}</span> chunks</span>',
-                            unsafe_allow_html=True,
-                        )
-                        for c in chunks_a[:5]:
-                            render_result_card(
-                                doc_id=c.get("doc_id", ""),
-                                scope=c.get("scope", "?"),
-                                content=c.get("content", ""),
-                                article_id=c.get("article_id", ""),
-                            )
-
-                    with col_right:
-                        st.markdown(f"### {doc_b}")
-                        if detail_b and detail_b.get("document"):
-                            d = detail_b["document"]
-                            if d.get("judul"):
-                                st.markdown(f"**{d['judul']}**")
-                            st.caption(f"{d.get('jenis', '')} | Year {d.get('tahun', '')} | No. {d.get('nomor', '')}")
-
-                        st.markdown(
-                            f'<span class="stat-pill"><span class="stat-pill-count">{len(chunks_b)}</span> chunks</span>',
-                            unsafe_allow_html=True,
-                        )
-                        for c in chunks_b[:5]:
-                            render_result_card(
-                                doc_id=c.get("doc_id", ""),
-                                scope=c.get("scope", "?"),
-                                content=c.get("content", ""),
-                                article_id=c.get("article_id", ""),
-                            )
-
-                    # Overall stance analysis
-                    section_divider("Relationship Analysis")
-
-                    with st.spinner("Analyzing relationship ..."):
-                        text_a = "\n\n".join(c.get("content", "") for c in chunks_a[:5])
-                        text_b = "\n\n".join(c.get("content", "") for c in chunks_b[:5])
-
-                        if text_a and text_b:
-                            overall = llm_stance.classify_stance(text_a, text_b, doc_a, doc_b)
-                            stance = overall["stance"]
-                            eng_label = graph_viz.STANCE_LABELS.get(stance, stance)
-
-                            r_col1, r_col2, r_col3 = st.columns([1.5, 1, 3.5])
-                            with r_col1:
-                                st.metric("Stance", eng_label)
-                            with r_col2:
-                                st.metric("Confidence", f"{overall.get('confidence', 0):.0%}")
-                            with r_col3:
-                                st.info(overall.get("reason", ""))
-
-                            # Per-section comparison
-                            section_divider("Section-by-Section Comparison")
-                            pairs_to_compare = []
-                            for ca in chunks_a[:3]:
-                                for cb in chunks_b[:3]:
-                                    pairs_to_compare.append({
-                                        "text_a": ca.get("content", ""),
-                                        "text_b": cb.get("content", ""),
-                                        "doc_a_id": f"{doc_a}/{ca.get('scope', '')}",
-                                        "doc_b_id": f"{doc_b}/{cb.get('scope', '')}",
-                                        "label_a": ca.get("scope", "?"),
-                                        "label_b": cb.get("scope", "?"),
-                                    })
-
-                            section_results = llm_stance.batch_classify(pairs_to_compare)
-
-                            for pair, result in zip(pairs_to_compare, section_results):
-                                s_badge = graph_viz.stance_badge_html(result["stance"])
-                                c1, c2, c3, c4 = st.columns([2, 2, 1.2, 3])
-                                with c1:
-                                    st.text(f"{doc_a}: {pair['label_a']}")
-                                with c2:
-                                    st.text(f"{doc_b}: {pair['label_b']}")
-                                with c3:
-                                    st.markdown(s_badge, unsafe_allow_html=True)
-                                with c4:
-                                    st.caption(result.get("reason", ""))
-                        else:
-                            st.warning("Insufficient document content for analysis.")
-
-            elif doc_a == doc_b:
-                st.warning("Please select two different documents.")
+        styled = df_kaus.style.map(color_kausalitas, subset=["Kausalitas"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
 # -- Footer -------------------------------------------------------------------
 st.markdown(
     '<div class="app-footer">'
     'GraphRAG &mdash; Legal Document Relationship Explorer'
-    ' &nbsp;&middot;&nbsp; Neo4j + Pinecone + OpenRouter'
+    ' &nbsp;&middot;&nbsp; Neo4j + Pinecone + HuggingFace + OpenRouter'
     '</div>',
     unsafe_allow_html=True,
 )

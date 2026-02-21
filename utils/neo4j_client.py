@@ -1,9 +1,41 @@
 """Neo4j graph database connector for legal document graph."""
 
 import os
-import streamlit as st
+import functools
+import certifi
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
+
+# Fix SSL on macOS Python 3.10 — set env var BEFORE any SSL connection is made.
+# The neo4j driver creates its own ssl.SSLContext which reads SSL_CERT_FILE.
+if not os.environ.get("SSL_CERT_FILE"):
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
+# ---------------------------------------------------------------------------
+# Streamlit-agnostic caching
+# ---------------------------------------------------------------------------
+_IN_STREAMLIT = False
+if not os.environ.get("GRAPHRAG_STANDALONE"):
+    try:
+        import streamlit as st
+        _IN_STREAMLIT = True
+    except ImportError:
+        pass
+
+
+def _cache_resource(func):
+    if _IN_STREAMLIT:
+        return st.cache_resource(func)
+    return functools.lru_cache(maxsize=1)(func)
+
+
+def _cache_data(**kwargs):
+    def decorator(func):
+        if _IN_STREAMLIT:
+            return st.cache_data(**kwargs)(func)
+        return func
+    return decorator
+
 
 load_dotenv()
 
@@ -12,7 +44,7 @@ NEO4J_USER = os.getenv("NEO4J_USER")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 
-@st.cache_resource
+@_cache_resource
 def get_driver():
     """Create and cache a Neo4j driver instance."""
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
@@ -28,7 +60,7 @@ def test_connection() -> bool:
         return False
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_all_documents() -> list[dict]:
     """Fetch all Document nodes with their properties."""
     driver = get_driver()
@@ -42,7 +74,7 @@ def get_all_documents() -> list[dict]:
         return [record["doc"] for record in result]
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_document_detail(doc_id: str) -> dict:
     """Fetch a single document with all its children (Pasal, Ayat, Diktum)."""
     driver = get_driver()
@@ -82,7 +114,7 @@ def get_document_detail(doc_id: str) -> dict:
         return {}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_document_subgraph(doc_ids: list[str]) -> dict:
     """
     Fetch subgraph for given doc_ids: all nodes (Document, Pasal, Ayat, Diktum)
@@ -136,7 +168,7 @@ def get_document_subgraph(doc_ids: list[str]) -> dict:
         return {"nodes": [], "edges": []}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_citing_documents(doc_id: str, hops: int = 2) -> dict:
     """
     Fetch k-hop subgraph around a document via CITES and HIGHER relationships.
@@ -179,7 +211,7 @@ def get_citing_documents(doc_id: str, hops: int = 2) -> dict:
         return {"nodes": [], "edges": []}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_edges_between(doc_ids: list[str]) -> dict:
     """
     Fetch only the CITES/HIGHER edges that connect documents within the given list.
@@ -214,7 +246,7 @@ def get_edges_between(doc_ids: list[str]) -> dict:
         return {"nodes": [], "edges": []}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_graph_overview() -> dict:
     """
     Fetch the full document-level graph: all Document nodes
@@ -244,7 +276,7 @@ def get_graph_overview() -> dict:
         return {"nodes": [], "edges": []}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def get_schema_info() -> dict:
     """Get counts of each node label and relationship type."""
     driver = get_driver()
@@ -280,3 +312,38 @@ def get_schema_info() -> dict:
             rel_counts = {}
 
     return {"node_counts": node_counts, "rel_counts": rel_counts}
+
+
+@_cache_data(ttl=3600)
+def get_related_documents(doc_id: str, limit: int = 3) -> list[dict]:
+    """
+    Fetch documents directly related to the given doc_id via CITES or HIGHER.
+    Returns up to `limit` related document nodes.
+    """
+    driver = get_driver()
+    query = """
+    MATCH (d:Document {doc_id: $doc_id})-[:CITES|HIGHER]-(other:Document)
+    WHERE other.doc_id <> $doc_id
+    RETURN DISTINCT other {.doc_id, .judul, .jenis, .tahun, .nomor, .pembentuk} AS doc
+    LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(query, doc_id=doc_id, limit=limit)
+        return [record["doc"] for record in result]
+
+
+@_cache_data(ttl=3600)
+def get_all_document_pairs() -> list[dict]:
+    """
+    Fetch all CITES/HIGHER relationship pairs between documents.
+    Returns list of {source_id, target_id, type, raw}.
+    """
+    driver = get_driver()
+    query = """
+    MATCH (a:Document)-[r:CITES|HIGHER]->(b:Document)
+    RETURN DISTINCT a.doc_id AS source_id, b.doc_id AS target_id, type(r) AS type, r.raw AS raw
+    ORDER BY a.doc_id, b.doc_id
+    """
+    with driver.session() as session:
+        result = session.run(query)
+        return [dict(record) for record in result]

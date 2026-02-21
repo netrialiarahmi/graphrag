@@ -1,9 +1,35 @@
 """Pinecone vector database connector for legal document embeddings."""
 
 import os
-import streamlit as st
+import functools
 from pinecone import Pinecone
 from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Streamlit-agnostic caching
+# ---------------------------------------------------------------------------
+_IN_STREAMLIT = False
+if not os.environ.get("GRAPHRAG_STANDALONE"):
+    try:
+        import streamlit as st
+        _IN_STREAMLIT = True
+    except ImportError:
+        pass
+
+
+def _cache_resource(func):
+    if _IN_STREAMLIT:
+        return st.cache_resource(func)
+    return functools.lru_cache(maxsize=1)(func)
+
+
+def _cache_data(**kwargs):
+    def decorator(func):
+        if _IN_STREAMLIT:
+            return st.cache_data(**kwargs)(func)
+        return func
+    return decorator
+
 
 load_dotenv()
 
@@ -11,13 +37,13 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "lexport-trial")
 
 
-@st.cache_resource
+@_cache_resource
 def get_pinecone_client():
     """Create and cache a Pinecone client instance."""
     return Pinecone(api_key=PINECONE_API_KEY)
 
 
-@st.cache_resource
+@_cache_resource
 def get_index():
     """Get the Pinecone index."""
     pc = get_pinecone_client()
@@ -48,7 +74,7 @@ def get_index_stats() -> dict:
         return {"error": str(e)}
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def semantic_search(query_embedding: list[float], top_k: int = 10, scope_filter: str = None) -> list[dict]:
     """
     Search Pinecone with a query embedding vector.
@@ -81,7 +107,7 @@ def semantic_search(query_embedding: list[float], top_k: int = 10, scope_filter:
     return hits
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def search_by_text(query: str, top_k: int = 10, scope_filter: str = None) -> list[dict]:
     """
     Search Pinecone using text query (requires embedding first via OpenRouter/OpenAI).
@@ -96,7 +122,7 @@ def search_by_text(query: str, top_k: int = 10, scope_filter: str = None) -> lis
     )
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def fetch_by_doc_id(doc_id: str, top_k: int = 100) -> list[dict]:
     """Fetch all vectors belonging to a specific doc_id using metadata filter."""
     index = get_index()
@@ -126,7 +152,7 @@ def fetch_by_doc_id(doc_id: str, top_k: int = 100) -> list[dict]:
     return hits
 
 
-@st.cache_data(ttl=3600)
+@_cache_data(ttl=3600)
 def fetch_by_ids(ids: list[str]) -> list[dict]:
     """Fetch specific vectors by their IDs."""
     if not ids:
