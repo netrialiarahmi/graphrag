@@ -146,4 +146,40 @@ def fetch_by_doc_id(doc_id: str, top_k: int = 100) -> list[dict]:
     results = index.query(
         vector=rand_vec,
         top_k=top_k,
-        include_metadata=T
+        include_metadata=True,
+        filter={"doc_id": doc_id},
+    )
+
+    hits = []
+    for match in results.get("matches", []):
+        meta = match.get("metadata", {})
+        hits.append({
+            "id": match["id"],
+            "doc_id": meta.get("doc_id", ""),
+            "article_id": meta.get("article_id", ""),
+            "content": meta.get("content", ""),
+            "scope": meta.get("scope", ""),
+        })
+    return hits
+
+
+@_cache_data(ttl=3600)
+def fetch_by_ids(ids: list[str]) -> list[dict]:
+    """Fetch specific vectors by their IDs."""
+    if not ids:
+        return []
+
+    index = get_index()
+    results = index.fetch(ids=ids)
+
+    hits = []
+    for vid, vec_data in results.get("vectors", {}).items():
+        meta = vec_data.get("metadata", {})
+        hits.append({
+            "id": vid,
+            "doc_id": meta.get("doc_id", ""),
+            "article_id": meta.get("article_id", ""),
+            "content": meta.get("content", ""),
+            "scope": meta.get("scope", ""),
+        })
+    return hits

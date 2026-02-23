@@ -282,4 +282,68 @@ def get_schema_info() -> dict:
     driver = get_driver()
     node_query = """
     CALL db.labels() YIELD label
-    CALL apoc
+    CALL apoc.cypher.run('MATCH (n:`' + label + '`) RETURN count(n) AS cnt', {}) YIELD value
+    RETURN label, value.cnt AS count
+    """
+    # Fallback simpler query
+    simple_query = """
+    MATCH (n)
+    WITH labels(n) AS lbls
+    UNWIND lbls AS label
+    RETURN label, count(*) AS count
+    ORDER BY count DESC
+    """
+    rel_query = """
+    MATCH ()-[r]->()
+    RETURN type(r) AS type, count(*) AS count
+    ORDER BY count DESC
+    """
+    with driver.session() as session:
+        try:
+            node_result = session.run(simple_query)
+            node_counts = {r["label"]: r["count"] for r in node_result}
+        except Exception:
+            node_counts = {}
+
+        try:
+            rel_result = session.run(rel_query)
+            rel_counts = {r["type"]: r["count"] for r in rel_result}
+        except Exception:
+            rel_counts = {}
+
+    return {"node_counts": node_counts, "rel_counts": rel_counts}
+
+
+@_cache_data(ttl=3600)
+def get_related_documents(doc_id: str, limit: int = 3) -> list[dict]:
+    """
+    Fetch documents directly related to the given doc_id via CITES or HIGHER.
+    Returns up to `limit` related document nodes.
+    """
+    driver = get_driver()
+    query = """
+    MATCH (d:Document {doc_id: $doc_id})-[:CITES|HIGHER]-(other:Document)
+    WHERE other.doc_id <> $doc_id
+    RETURN DISTINCT other {.doc_id, .judul, .jenis, .tahun, .nomor, .pembentuk} AS doc
+    LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(query, doc_id=doc_id, limit=limit)
+        return [record["doc"] for record in result]
+
+
+@_cache_data(ttl=3600)
+def get_all_document_pairs() -> list[dict]:
+    """
+    Fetch all CITES/HIGHER relationship pairs between documents.
+    Returns list of {source_id, target_id, type, raw}.
+    """
+    driver = get_driver()
+    query = """
+    MATCH (a:Document)-[r:CITES|HIGHER]->(b:Document)
+    RETURN DISTINCT a.doc_id AS source_id, b.doc_id AS target_id, type(r) AS type, r.raw AS raw
+    ORDER BY a.doc_id, b.doc_id
+    """
+    with driver.session() as session:
+        result = session.run(query)
+        return [dict(record) for record in result]
