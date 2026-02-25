@@ -81,12 +81,16 @@ def recall_at_k(ranked: list[str], gt: set[str],
 
 def precision_at_k(ranked: list[str], gt: set[str],
                    aliases: dict[str, set[str]], k: int) -> float:
-    """Fraction of top-K retrieved documents that are relevant."""
-    top_k = ranked[:k]
-    if not top_k:
+    """Fraction of top-K slots that are relevant (TREC-style).
+
+    Divides by K (not by len(ranked[:k])), so if fewer than K docs were
+    retrieved the missing slots are implicitly treated as non-relevant.
+    """
+    if k == 0:
         return 0.0
+    top_k = ranked[:k]
     n_relevant = sum(1 for d in top_k if _is_relevant(d, gt, aliases))
-    return n_relevant / len(top_k)
+    return n_relevant / k
 
 
 def f1_at_k(p: float, r: float) -> float:
