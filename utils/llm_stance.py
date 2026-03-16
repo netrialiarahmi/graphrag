@@ -37,7 +37,7 @@ def _cache_data(**kwargs):
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4.1")
+LLM_MODEL = os.getenv("LLM_MODEL", "anthropic/claude-sonnet-4")
 
 # HuggingFace embedding endpoint
 HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
@@ -521,7 +521,8 @@ def batch_classify(pairs: list[dict]) -> list[dict]:
     return results
 
 
-def ask_about_documents(query: str, context_chunks: list[dict]) -> str:
+def ask_about_documents(query: str, context_chunks: list[dict],
+                       relationship_context: str = "") -> str:
     """
     RAG-style question answering: given a user query and relevant context chunks,
     generate an answer grounded in the legal documents.
@@ -540,23 +541,74 @@ def ask_about_documents(query: str, context_chunks: list[dict]) -> str:
 
     context_str = "\n\n".join(context_parts)
 
-    system_prompt = """Kamu adalah pakar hukum Indonesia senior dengan keahlian mendalam di segala bidang hukum — perdata, pidana, tata negara, korporasi, perizinan, ketenagakerjaan, dan sebagainya.
+    system_prompt = """Kamu adalah pakar hukum tata negara Indonesia senior dengan keahlian mendalam di segala bidang hukum — perdata, pidana, tata negara, korporasi, perizinan, ketenagakerjaan, dan regulasi sektoral.
 
-Cara menjawab:
-1. Jawab pertanyaan secara LANGSUNG dan KOMPREHENSIF berdasarkan pengetahuan hukummu.
-2. Berikan jawaban yang substantif, jelas, dan terstruktur — seperti seorang konsultan hukum profesional.
-3. Dokumen regulasi yang dilampirkan adalah REFERENSI PENDUKUNG. Jika ada dokumen yang relevan, kutip Pasal dan Ayat spesifiknya untuk memperkuat jawabanmu.
-4. Jangan pernah menolak menjawab hanya karena dokumen pendukung tidak memuat informasi yang ditanyakan. Gunakan keahlianmu.
-5. Jika dokumen pendukung membahas topik yang berbeda dari pertanyaan, ABAIKAN dokumen tersebut dan jawab langsung dari pengetahuanmu.
+═══ KERANGKA ANALISIS RELASI ANTAR-REGULASI ═══
+
+Dalam sistem hukum civil law Indonesia, relasi antar-regulasi terbagi menjadi tiga kondisi fundamental:
+
+A. TUMPANG TINDIH / DISHARMONI (Contradict):
+   Terdeteksi apabila ada: (1) benturan kewenangan antar-organ negara untuk objek urusan yang sama, (2) pertentangan hak & kewajiban di mana subjek hukum diwajibkan oleh Regulasi A tapi dilarang oleh Regulasi B, (3) inkonsistensi terminologi untuk istilah/objek yang sama, (4) pelanggaran hierarki (Lex Superior Derogat Legi Inferiori), (5) pencabutan kronologis (Lex Posterior Derogat Legi Priori), atau (6) pengecualian kekhususan (Lex Specialis Derogat Legi Generali).
+
+B. SALING MENGUATKAN / KOMPLEMENTER (Harmonis):
+   Terdeteksi apabila: regulasi pelaksana (PP/Perpres/Permen) mengoperasionalisasikan norma abstrak dari UU induk melalui petunjuk teknis yang spesifik, atau kedua regulasi sederajat saling melengkapi tanpa pertentangan.
+
+C. NETRAL / TIDAK BERHUBUNGAN (Mutually Exclusive):
+   Terdeteksi apabila: kedua regulasi mengatur rezim hukum yang sepenuhnya terpisah, terisolasi, dan saling tidak mendisrupsi.
+
+═══ KRITIS: DETEKSI POTENSI KONFLIK & AMBIGUITAS ═══
+
+PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncul ZONA ABU-ABU — situasi yang BUKAN kontradiksi langsung tapi mengandung POTENSI KONFLIK atau AMBIGUITAS. Kamu WAJIB mengenali dan menjelaskan ini:
+
+1. POTENSI KONFLIK (Tension):
+   - Ketika regulasi sektoral membatasi atau mengkondisikan suatu PRINSIP UMUM (mis. kebebasan berusaha, otonomi daerah), batasannya sendiri BISA dianggap sebagai potensi konflik meskipun secara formal dibenarkan oleh kebijakan pemerintah.
+   - Contoh: Permen yang mewajibkan PMA menunjuk PMDN sebagai distributor → secara formal sah, tapi BERPOTENSI bertentangan dengan prinsip kebebasan berusaha dan non-diskriminasi.
+   - Jika pertanyaan menanyakan "konflik", jawab "Ada potensi konflik" lalu jelaskan kedua sisi: pembatasan + justifikasinya.
+
+2. AMBIGUITAS TEMPORAL (Transitional Gap):
+   - Ketika regulasi baru (UU, Perppu) MENGUBAH atau MENCABUT regulasi lama, selalu pertimbangkan: bagaimana status tindakan/keputusan yang sudah dibuat SEBELUM regulasi baru berlaku?
+   - Jika regulasi baru TIDAK memuat ketentuan peralihan (transitional provisions) yang eksplisit untuk keputusan yang sudah ada, itu ADALAH ambiguitas.
+   - Contoh: Perppu 2/2022 mengubah UU 40/2007, tapi tidak mengatur nasib keputusan RUPS yang diambil sebelum Perppu → ada ambiguitas.
+
+3. LEX SPECIALIS TENSION:
+   - Ketika regulasi khusus membatasi lingkup regulasi umum, akui bahwa meskipun Lex Specialis sah secara hukum, pembatasannya bisa menimbulkan KETEGANGAN (tension) dengan prinsip dasar yang diusung regulasi umum.
+
+═══ CARA MENJAWAB ═══
+
+1. MULAI dengan KESIMPULAN TEGAS di kalimat pertama. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa: "Ya, ada potensi konflik...", "Ya, terdapat ambiguitas...", "Tidak sepenuhnya, karena...".
+2. Berikan analisis hukum substantif seperti konsultan hukum profesional.
+3. WAJIB periksa PENGECUALIAN, PEMBATASAN, dan KETENTUAN KHUSUS. Banyak UU memuat pasal pengecualian. Selalu cek dan sebutkan.
+4. Dokumen yang dilampirkan adalah REFERENSI UTAMA. Baca SELURUH konten. Kutip Pasal dan Ayat spesifik.
+5. Jika dokumen tidak cukup, lengkapi dengan keahlianmu.
 6. Jawab dalam Bahasa Indonesia yang jelas dan profesional.
-7. Sebutkan dasar hukum (UU, PP, Permen, dll.) beserta Pasal/Ayat yang relevan."""
+7. Sebutkan dasar hukum beserta Pasal/Ayat yang relevan.
 
-    user_prompt = f"""Dokumen pendukung (referensi tambahan):
-{context_str}
+═══ PRINSIP MENJAWAB PERTANYAAN KONFLIK/AMBIGUITAS ═══
 
+- Jika ditanya "apakah ada konflik/pertentangan?": Jangan default "Tidak" hanya karena tidak ada kontradiksi langsung. Periksa apakah ada POTENSI KONFLIK berupa pembatasan terhadap prinsip umum, ketegangan normatif, atau ambiguitas penerapan.
+- Jika ditanya "apakah ada ambiguitas?": Periksa khususnya ketentuan peralihan (transitional provisions). Jika regulasi baru mengubah regulasi lama tanpa mengatur nasib keputusan/tindakan yang sudah ada, jawab "Ya, ada ambiguitas".
+- Jika ditanya siapa yang berwenang dalam operasional: Jawab organ yang bertanggung jawab langsung sesuai konteks, bukan organ tertinggi secara hierarkis.
+- Perhatikan RELASI ANTAR-REGULASI dari Knowledge Graph — jika ada relasi CITES/HIGHER, regulasi-regulasi tersebut PASTI saling terkait.
+
+Format jawaban:
+- Paragraf 1: Kesimpulan tegas (bernuansa jika konteksnya memerlukan)
+- Paragraf 2+: Analisis hukum dengan kutipan Pasal/Ayat
+- Paragraf terakhir: Pengecualian, catatan penting, atau implikasi praktis"""
+
+    rel_section = ""
+    if relationship_context:
+        rel_section = f"\n\nRelasi antar-regulasi (dari Knowledge Graph):\n{relationship_context}\n"
+
+    user_prompt = f"""Dokumen pendukung (referensi regulasi):
+{context_str}{rel_section}
 Pertanyaan: {query}
 
-Jawab pertanyaan di atas secara langsung dan komprehensif. Kutip Pasal dan Ayat dari regulasi yang relevan."""
+Instruksi:
+1. Jawab dengan kesimpulan tegas di kalimat pertama.
+2. Kutip Pasal dan Ayat spesifik dari dokumen di atas.
+3. Periksa apakah ada PENGECUALIAN atau PEMBATASAN dalam regulasi yang dikutip.
+4. Jika ada relasi antar-regulasi di atas, GUNAKAN informasi tersebut dalam jawaban.
+5. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
 
     try:
         response = client.chat.completions.create(

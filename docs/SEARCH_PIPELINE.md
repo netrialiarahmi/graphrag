@@ -100,7 +100,7 @@ flowchart TD
     subgraph "Phase G — Content Assembly"
         G --> G1a["G1: VDB semantic hits"]
         G --> G2a["G2: VDB fetch_by_doc_id supplement"]
-        G --> G3a["G3: Neo4j Pasal/Ayat (if VDB < 5 chunks)"]
+        G --> G3a["G3: Neo4j Pasal/Ayat (always fetched, dedup)"]
         G --> G4a["G4: Neo4j direct neighbors"]
     end
 
@@ -110,16 +110,20 @@ flowchart TD
     G4a --> G5
 
     subgraph "Phase G.5 — Round-Robin Interleave"
-        G5["<code>_build_interleaved_context()</code><br/>1 chunk/doc/cycle, semantic-scored first<br/>Cap: 30 chunks / 12,000 chars"]
+        G5["<code>_build_interleaved_context()</code><br/>1 chunk/doc/cycle, semantic-scored first<br/>Cap: 40 chunks / 16,000 chars"]
     end
 
     G5 --> H
 
     subgraph "Phase H — Answer Generation"
-        H["GPT-4.1 synthesizes answer<br/><code>llm_stance.ask_about_documents()</code><br/>Cites Pasal & Ayat"]
+        H["H1: Query graph edges<br/><code>neo4j_client.get_edges_between()</code>"]
+        H2["H2: GPT-4.1 synthesizes answer<br/><code>llm_stance.ask_about_documents()</code><br/>+ relationship_context + anti-bias prompt"]
+        H --> H2
     end
 
-    H --> ANS["📋 Jawaban"]
+    H2 --> ANS["📋 Jawaban + Relationship Graph"]
+
+    ANS --> GRAPH["Phase H.5 — Relationship Visualization<br/><code>graph_viz.render_document_graph()</code><br/>Interactive subgraph of cited documents"]
 ```
 
 ---
@@ -222,31 +226,53 @@ LLM scores each candidate 0-10. Keep score ≥ 3, max 7 documents. Graph + regex
 
 Assembles all available content per document from both VDB and Neo4j.
 
+**G3 — Always Fetched:** Neo4j Pasal/Ayat content is **always** fetched for all primary documents (no minimum-chunk guard). A `seen_chunk_ids` set deduplicates Neo4j chunks against VDB chunks already present.
+
 ### Phase G.5 — Round-Robin Interleave
 
 | Function | Module | Location |
 |----------|--------|----------|
-| `_build_interleaved_context(primary, related, context_docs, max_chunks=30, max_chars=12000)` | `app.py` | Lines ~680-730 |
+| `_build_interleaved_context(primary, related, context_docs, max_chunks=40, max_chars=16000)` | `app.py` | Lines ~493-555 |
 
 **Algorithm:**
 1. Group all chunks by `doc_id`
 2. Per doc: sort by semantic score (scored first, then unscored)
 3. Round-robin: take 1 chunk from each doc in turn, cycling through all docs
-4. Stop at 30 chunks or 12,000 characters
+4. Stop at **40 chunks** or **16,000 characters**
 
 **Why it matters:** Without this, a document with 50+ chunks fills the entire context window. Other documents are invisible to the LLM. This is critical for multi-document questions.
 
 ### Phase H — Answer Generation
 
-| Function | Module | Service | Cost |
-|----------|--------|---------|------|
-| `ask_about_documents(query, llm_chunks)` | `llm_stance` | OpenRouter GPT-4.1 | ~1500-2000 tokens |
+| Step | Function | Module | Service | Cost |
+|------|----------|--------|---------|------|
+| H1: Query edges | `get_edges_between(doc_ids)` | `neo4j_client` | Neo4j Aura | 1 Cypher query |
+| H2: Generate answer | `ask_about_documents(query, chunks, relationship_context)` | `llm_stance` | OpenRouter GPT-4.1 | ~1500-2000 tokens |
 
-GPT-4.1 synthesizes the answer from interleaved context. Instructed to:
-- Answer directly and comprehensively
-- Cite specific Pasal & Ayat
-- Ignore irrelevant context documents
+**H1 — Relationship Context:** Queries Neo4j for all CITES/HIGHER edges between the documents in `context_docs`. Builds a text block like:
+```
+- UU-NASIONAL-40-2007 --[CITES]--> PP-NASIONAL-16-2021
+- PP-NASIONAL-16-2021 --[HIGHER]--> PERMEN-NASIONAL-5-2022
+```
+This is injected into the LLM prompt so it understands cross-document relationships.
+
+**H2 — Answer Generation:** GPT-4.1 synthesizes the answer from interleaved context + relationship graph. The system prompt includes:
+- **Anti-"Tidak" bias guard:** "JANGAN langsung menjawab Tidak tanpa analisis mendalam" — prevents the LLM from defaulting to "No" on regulatory relationship questions
+- **Relationship awareness:** Uses CITES/HIGHER edges to infer connections between regulations
+- **Exception/limitation checking:** Reads ENTIRE document content, checks for exception clauses (many UU have them)
+- Start with firm conclusion, cite specific Pasal & Ayat
 - Fall back to legal expertise if documents are insufficient
+
+### Phase H.5 — Relationship Visualization (UI only)
+
+| Function | Module | Service |
+|----------|--------|---------|
+| `render_document_graph(nodes, edges)` | `graph_viz` | Local |
+
+After the answer is displayed, an interactive graph visualization shows the **subgraph** of documents used in the answer and their CITES/HIGHER relationships. This helps users:
+- See which regulations cite or override each other
+- Understand the legal hierarchy between referenced documents
+- Explore relationships by clicking on document nodes
 
 ---
 
@@ -305,7 +331,7 @@ GPT-4.1 synthesizes the answer from interleaved context. Instructed to:
 | `smart_doc_lookup(query, all_docs)` | `(str, list[dict]) → list[str]` | LLM picks ≤10 doc_ids from Neo4j catalog |
 | `rerank_documents(query, doc_summaries)` | `(str, dict[str,str]) → list[tuple[str,float]]` | LLM scores docs 0-10, sorted descending |
 | `judge_sufficiency(query, doc_ids, doc_summaries)` | `(str, list[str], dict[str,str]) → bool` | LLM judges if docs are enough to answer |
-| `ask_about_documents(query, context_chunks)` | `(str, list[dict]) → str` | RAG answer generation with Pasal citations |
+| `ask_about_documents(query, context_chunks, relationship_context)` | `(str, list[dict], str) → str` | RAG answer generation with Pasal citations + graph context |
 
 ### `utils/pinecone_client.py`
 
@@ -322,6 +348,7 @@ GPT-4.1 synthesizes the answer from interleaved context. Instructed to:
 | `get_document_detail(doc_id)` | `(str) → dict` | Doc + Pasal + Ayat + Diktum |
 | `get_related_documents(doc_id, limit)` | `(str, int) → list[dict]` | 1-hop CITES/HIGHER neighbors |
 | `get_citing_documents(doc_id, hops)` | `(str, int) → dict` | K-hop expansion via CITES/HIGHER |
+| `get_edges_between(doc_ids)` | `(list[str]) → dict` | CITES/HIGHER edges between given docs |
 
 ### `utils/benchmark_helpers.py`
 
@@ -334,7 +361,7 @@ GPT-4.1 synthesizes the answer from interleaved context. Instructed to:
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `_build_interleaved_context(primary, related, context_docs, max_chunks, max_chars)` | `(list, list, dict, int, int) → list[dict]` | Round-robin interleave, 30 chunks / 12k chars |
+| `_build_interleaved_context(primary, related, context_docs, max_chunks, max_chars)` | `(list, list, dict, int, int) → list[dict]` | Round-robin interleave, 40 chunks / 16k chars |
 
 ---
 

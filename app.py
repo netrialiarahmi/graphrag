@@ -592,6 +592,8 @@ if "search_answer" not in st.session_state:
     st.session_state.search_answer = None
 if "search_context_docs" not in st.session_state:
     st.session_state.search_context_docs = {}
+if "search_edges" not in st.session_state:
+    st.session_state.search_edges = None
 # (benchmark_results and causality_results are now stored as CSV files in output/)
 
 # -- Connection checks (cached per session) ------------------------------------
@@ -1015,33 +1017,37 @@ with tab_search:
                             doc_chunks.append(ch)
                             seen_chunk_ids.add(cid)
 
-                    # G3. Neo4j Pasal/Ayat content (if VDB has few chunks)
-                    if len(doc_chunks) < 5 and neo4j_ok:
+                    # G3. Neo4j Pasal/Ayat content (always for primary docs)
+                    if neo4j_ok:
                         try:
                             detail = neo4j_client.get_document_detail(did)
                             for pasal in detail.get("pasals", []):
                                 p_content = pasal.get("content", "")
                                 p_name = pasal.get("name", "")
-                                if p_content and len(p_content) > 20:
+                                neo4j_id = f"neo4j-{did}-{p_name}"
+                                if p_content and len(p_content) > 20 and neo4j_id not in seen_chunk_ids:
                                     doc_chunks.append({
-                                        "id": f"neo4j-{did}-{p_name}",
+                                        "id": neo4j_id,
                                         "doc_id": did,
                                         "article_id": p_name,
                                         "content": p_content,
                                         "scope": "neo4j-pasal",
                                     })
+                                    seen_chunk_ids.add(neo4j_id)
                             for ayat in detail.get("ayats", []):
                                 a_content = ayat.get("content", "")
                                 a_name = ayat.get("name", "")
                                 p_name = ayat.get("pasal_name", "")
-                                if a_content and len(a_content) > 20:
+                                neo4j_id = f"neo4j-{did}-{p_name}-{a_name}"
+                                if a_content and len(a_content) > 20 and neo4j_id not in seen_chunk_ids:
                                     doc_chunks.append({
-                                        "id": f"neo4j-{did}-{p_name}-{a_name}",
+                                        "id": neo4j_id,
                                         "doc_id": did,
                                         "article_id": f"{p_name} {a_name}",
                                         "content": a_content,
                                         "scope": "neo4j-ayat",
                                     })
+                                    seen_chunk_ids.add(neo4j_id)
                         except Exception:
                             pass
 
@@ -1076,31 +1082,53 @@ with tab_search:
 
             # ── Phase H: Context Building & Answer ───────────────────
             with progress_container.status("💡 **Menghasilkan jawaban dengan GPT …**", expanded=True) as status_h:
+                # Build relationship context from Neo4j graph edges
+                relationship_context = ""
+                edges_data = {"nodes": [], "edges": []}
+                if neo4j_ok:
+                    try:
+                        all_doc_ids = list(context_docs.keys())
+                        edges_data = neo4j_client.get_edges_between(all_doc_ids)
+                        rel_lines = []
+                        for edge in edges_data.get("edges", []):
+                            src = edge.get("source_id", "")
+                            tgt = edge.get("target_id", "")
+                            rel_type = edge.get("type", "")
+                            if src and tgt and rel_type:
+                                rel_lines.append(f"- {src} --[{rel_type}]--> {tgt}")
+                        if rel_lines:
+                            relationship_context = "\n".join(rel_lines)
+                    except Exception:
+                        pass
+                st.session_state.search_edges = edges_data
+
                 # G.5: Round-robin interleave ensures every doc is
-                # represented in the LLM context (max 30 chunks / 12k chars)
+                # represented in the LLM context (max 40 chunks / 16k chars)
 
                 llm_chunks = _build_interleaved_context(
                     primary_doc_ids=primary_doc_ids,
                     related_doc_ids=related_doc_ids,
                     context_docs=context_docs,
-                    max_chunks=30,
-                    max_chars=12000,
+                    max_chunks=40,
+                    max_chars=16000,
                 )
 
-                answer = llm_stance.ask_about_documents(query, llm_chunks)
+                answer = llm_stance.ask_about_documents(
+                    query, llm_chunks,
+                    relationship_context=relationship_context,
+                )
                 st.session_state.search_answer = answer
                 status_h.update(label="💡 **Jawaban** — selesai", state="complete", expanded=False)
 
         except Exception as e:
             st.error(f"Error: {e}")
             st.session_state.search_answer = None
+            st.session_state.search_edges = None
 
     # Display answer
     if st.session_state.search_answer:
         section_divider("Jawaban")
         st.markdown(st.session_state.search_answer)
-
-    # (Source documents and relationship graph hidden from UI)
 
 
 # ==============================================================================
