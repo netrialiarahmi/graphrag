@@ -766,146 +766,235 @@ with tab_search:
     search_btn = st.button("Cari & Jawab", type="primary", key="search_btn")
 
     if query and search_btn:
-        with st.spinner("Menganalisis pertanyaan & mencari dokumen relevan ..."):
-            try:
-                # ════════════════════════════════════════════════════════════
-                # GRAPHRAG-FIRST RETRIEVAL PIPELINE
-                # ════════════════════════════════════════════════════════════
+        progress_container = st.container()
+        try:
+            # ════════════════════════════════════════════════════════════
+            # GRAPHRAG-FIRST RETRIEVAL PIPELINE (with early-exit gates)
+            # ════════════════════════════════════════════════════════════
 
-                # ── Phase A: Query Analysis ──────────────────────────────
-
+            # ── Phase A: Query Analysis ──────────────────────────────
+            with progress_container.status("🔍 **Menganalisis pertanyaan …**", expanded=True) as status_a:
                 # A1. Parse explicit doc references from query text
                 regex_doc_ids = _extract_doc_ids_from_question(query)
 
                 # A2. LLM query expansion
                 expanded_terms = llm_stance.expand_query(query)
+                status_a.update(label="🔍 **Analisis pertanyaan** — selesai", state="complete", expanded=False)
 
-                # ── Phase B: GraphRAG Document Discovery ─────────────────
-                # Use LLM to identify relevant docs from the FULL Neo4j
-                # catalog — this bypasses the embedding model entirely.
-
+            # ── Phase B: GraphRAG Document Discovery ─────────────────
+            with progress_container.status("📚 **Mencari dokumen di Knowledge Graph …**", expanded=True) as status_b:
                 graph_doc_ids: list[str] = []
                 if neo4j_ok:
                     all_neo4j_docs = neo4j_client.get_all_documents()
                     graph_doc_ids = llm_stance.smart_doc_lookup(query, all_neo4j_docs)
+                status_b.update(label=f"📚 **Knowledge Graph** — {len(graph_doc_ids)} dokumen ditemukan", state="complete", expanded=False)
 
-                # ── Phase C: VDB Semantic Search (supplementary) ─────────
+            # ── Gate 1: Sufficiency check (regex + GraphRAG) ─────────
+            with progress_container.status("⚖️ **Mengevaluasi kecukupan dokumen (Gate 1) …**", expanded=True) as status_g1:
+                gate1_doc_ids = list(dict.fromkeys(
+                    list(graph_doc_ids) + list(regex_doc_ids)
+                ))  # Deduplicated, order preserved
 
-                query_embedding = llm_stance.get_embedding(query)
-                raw_results = pinecone_client.semantic_search(
-                    query_embedding=query_embedding,
-                    top_k=100,
-                )
-
-                # Also search with expanded terms
-                seen_ids: set[str] = {h.get("id", "") for h in raw_results}
-                for term in expanded_terms[:3]:
-                    try:
-                        term_emb = llm_stance.get_embedding(term)
-                        term_results = pinecone_client.semantic_search(
-                            query_embedding=term_emb, top_k=30,
-                        )
-                        for hit in term_results:
-                            hid = hit.get("id", "")
-                            if hid and hid not in seen_ids:
-                                raw_results.append(hit)
-                                seen_ids.add(hid)
-                    except Exception:
-                        pass
-
-                vdb_doc_ids = _get_unique_doc_ids(raw_results, 10)
-
-                # ── Phase D: Merge all doc sources ───────────────────────
-                # Priority: graph_doc_ids (LLM-picked) > regex > VDB
-
-                merged_doc_ids: list[str] = []
-                added: set[str] = set()
-
-                for did in graph_doc_ids:  # LLM catalog picks first
-                    if did not in added:
-                        merged_doc_ids.append(did)
-                        added.add(did)
-                for did in regex_doc_ids:  # Regex-extracted second
-                    if did not in added:
-                        merged_doc_ids.append(did)
-                        added.add(did)
-                for did in vdb_doc_ids:  # VDB third
-                    if did not in added:
-                        merged_doc_ids.append(did)
-                        added.add(did)
-
-                if not merged_doc_ids:
-                    st.warning("Tidak ditemukan dokumen yang relevan.")
-                    st.stop()
-
-                # ── Phase E: Deep Graph Traversal ────────────────────────
-                # 2-hop traversal from top graph docs to find linked docs
-
-                graph_expanded_ids: list[str] = []
-                if neo4j_ok:
-                    for did in merged_doc_ids[:5]:
-                        try:
-                            subgraph = neo4j_client.get_citing_documents(did, hops=2)
-                            for node in subgraph.get("nodes", []):
-                                ndid = node.get("doc_id", "")
-                                if ndid and ndid not in added:
-                                    graph_expanded_ids.append(ndid)
-                                    added.add(ndid)
-                        except Exception:
-                            pass
-
-                # ── Phase F: Re-ranking ALL candidates ───────────────────
-                # Build summaries from VDB + Neo4j content
-
-                all_candidate_ids = merged_doc_ids + graph_expanded_ids
-                doc_summaries: dict[str, str] = {}
-
-                # Group VDB semantic hits by doc
+                early_exit = False
+                raw_results: list[dict] = []
                 semantic_chunks_by_doc: dict[str, list[dict]] = {}
-                for hit in raw_results:
-                    did = hit.get("doc_id", "")
-                    if did:
-                        semantic_chunks_by_doc.setdefault(did, []).append(hit)
+                graph_expanded_ids: list[str] = []
 
-                for did in all_candidate_ids:
-                    summary = ""
-                    # Try VDB first
-                    if did in semantic_chunks_by_doc:
-                        summary = semantic_chunks_by_doc[did][0].get("content", "")
-                    if not summary:
-                        vdb_chunks = pinecone_client.fetch_by_doc_id(did, top_k=3)
-                        if vdb_chunks:
-                            summary = vdb_chunks[0].get("content", "")
-                    # Fallback: Neo4j Pasal content
-                    if not summary and neo4j_ok:
+                if gate1_doc_ids and neo4j_ok:
+                    # Build summaries from Neo4j for sufficiency check
+                    gate1_summaries: dict[str, str] = {}
+                    for did in gate1_doc_ids[:10]:
                         try:
                             detail = neo4j_client.get_document_detail(did)
                             pasals = detail.get("pasals", [])
                             if pasals:
                                 texts = [p.get("content", "") or p.get("name", "") for p in pasals[:3]]
-                                summary = " ".join(t for t in texts if t)
+                                gate1_summaries[did] = " ".join(t for t in texts if t)[:500]
+                            elif detail.get("document", {}).get("judul"):
+                                gate1_summaries[did] = detail["document"]["judul"]
+                            else:
+                                gate1_summaries[did] = ""
                         except Exception:
-                            pass
-                    doc_summaries[did] = summary[:500] if summary else ""
+                            gate1_summaries[did] = ""
 
-                ranked = llm_stance.rerank_documents(query, doc_summaries)
+                    if llm_stance.judge_sufficiency(query, gate1_doc_ids, gate1_summaries):
+                        # Early exit: skip C, D, E, F → jump to G
+                        early_exit = True
+                        primary_doc_ids = gate1_doc_ids[:7]
+                        merged_doc_ids = gate1_doc_ids
+                        added = set(gate1_doc_ids)
 
-                # Keep docs scoring >= 3, max 7
-                primary_doc_ids = [did for did, score in ranked if score >= 3.0][:7]
+                if early_exit:
+                    status_g1.update(label="⚖️ **Gate 1** — cukup, lanjut ke jawaban", state="complete", expanded=False)
+                else:
+                    status_g1.update(label="⚖️ **Gate 1** — perlu pencarian lebih lanjut", state="complete", expanded=False)
 
-                # Ensure graph + regex picks are always included
-                for did in list(graph_doc_ids[:5]) + list(regex_doc_ids):
-                    if did not in primary_doc_ids:
-                        primary_doc_ids.append(did)
+            if not early_exit:
+                # ── Phase C (lite): VDB Semantic Search ──────────────
+                with progress_container.status("🔎 **Pencarian semantik (Vector DB) …**", expanded=True) as status_c:
+                    query_embedding = llm_stance.get_embedding(query)
+                    raw_results = pinecone_client.semantic_search(
+                        query_embedding=query_embedding,
+                        top_k=30,
+                    )
 
-                if not primary_doc_ids:
-                    primary_doc_ids = merged_doc_ids[:5]
+                    # Group VDB semantic hits by doc (needed for summaries)
+                    for hit in raw_results:
+                        did = hit.get("doc_id", "")
+                        if did:
+                            semantic_chunks_by_doc.setdefault(did, []).append(hit)
 
-                st.session_state.search_doc_ids = primary_doc_ids
-                st.session_state.search_results = raw_results
+                    vdb_doc_ids = _get_unique_doc_ids(raw_results, 10)
+                    status_c.update(label=f"🔎 **Vector DB** — {len(vdb_doc_ids)} dokumen", state="complete", expanded=False)
 
-                # ── Phase G: Content Assembly (VDB + Neo4j) ──────────────
+                # ── Phase D: Merge all doc sources ───────────────────
+                with progress_container.status("🔗 **Menggabungkan sumber dokumen …**", expanded=True) as status_d:
+                    merged_doc_ids: list[str] = []
+                    added: set[str] = set()
 
+                    for did in graph_doc_ids:
+                        if did not in added:
+                            merged_doc_ids.append(did)
+                            added.add(did)
+                    for did in regex_doc_ids:
+                        if did not in added:
+                            merged_doc_ids.append(did)
+                            added.add(did)
+                    for did in vdb_doc_ids:
+                        if did not in added:
+                            merged_doc_ids.append(did)
+                            added.add(did)
+
+                    if not merged_doc_ids:
+                        st.warning("Tidak ditemukan dokumen yang relevan.")
+                        st.stop()
+                    status_d.update(label=f"🔗 **Merge** — {len(merged_doc_ids)} dokumen kandidat", state="complete", expanded=False)
+
+                # ── Gate 2: Sufficiency check (merged candidates) ────
+                with progress_container.status("⚖️ **Mengevaluasi kecukupan dokumen (Gate 2) …**", expanded=True) as status_g2:
+                    gate2_summaries: dict[str, str] = {}
+                    for did in merged_doc_ids[:10]:
+                        if did in semantic_chunks_by_doc:
+                            gate2_summaries[did] = semantic_chunks_by_doc[did][0].get("content", "")[:500]
+                        else:
+                            gate2_summaries[did] = ""
+
+                    gate2_passed = llm_stance.judge_sufficiency(query, merged_doc_ids, gate2_summaries)
+
+                    if gate2_passed:
+                        # Skip E, F → jump to G
+                        primary_doc_ids = merged_doc_ids[:7]
+                        # Ensure graph + regex picks are always included
+                        for did in list(graph_doc_ids[:5]) + list(regex_doc_ids):
+                            if did not in primary_doc_ids:
+                                primary_doc_ids.append(did)
+                        status_g2.update(label="⚖️ **Gate 2** — cukup, lanjut ke jawaban", state="complete", expanded=False)
+                    else:
+                        status_g2.update(label="⚖️ **Gate 2** — perlu pencarian mendalam", state="complete", expanded=False)
+
+                if not gate2_passed:
+                    # ── Phase C (full): Expand VDB search ────────────
+                    with progress_container.status("🔎 **Memperluas pencarian semantik …**", expanded=True) as status_cf:
+                        if len(raw_results) < 60:
+                            more_results = pinecone_client.semantic_search(
+                                query_embedding=query_embedding,
+                                top_k=100,
+                            )
+                            seen_ids: set[str] = {h.get("id", "") for h in raw_results}
+                            for hit in more_results:
+                                hid = hit.get("id", "")
+                                if hid and hid not in seen_ids:
+                                    raw_results.append(hit)
+                                    seen_ids.add(hid)
+                                    did = hit.get("doc_id", "")
+                                    if did:
+                                        semantic_chunks_by_doc.setdefault(did, []).append(hit)
+
+                        # Also search with expanded terms
+                        seen_ids_exp: set[str] = {h.get("id", "") for h in raw_results}
+                        for term in expanded_terms[:3]:
+                            try:
+                                term_emb = llm_stance.get_embedding(term)
+                                term_results = pinecone_client.semantic_search(
+                                    query_embedding=term_emb, top_k=30,
+                                )
+                                for hit in term_results:
+                                    hid = hit.get("id", "")
+                                    if hid and hid not in seen_ids_exp:
+                                        raw_results.append(hit)
+                                        seen_ids_exp.add(hid)
+                                        did = hit.get("doc_id", "")
+                                        if did:
+                                            semantic_chunks_by_doc.setdefault(did, []).append(hit)
+                            except Exception:
+                                pass
+
+                        # Re-merge with expanded VDB results
+                        vdb_doc_ids_full = _get_unique_doc_ids(raw_results, 20)
+                        for did in vdb_doc_ids_full:
+                            if did not in added:
+                                merged_doc_ids.append(did)
+                                added.add(did)
+                        status_cf.update(label=f"🔎 **VDB diperluas** — {len(raw_results)} chunks", state="complete", expanded=False)
+
+                    # ── Phase E: Deep Graph Traversal ────────────────
+                    with progress_container.status("🕸️ **Menelusuri relasi antar-dokumen …**", expanded=True) as status_e:
+                        if neo4j_ok:
+                            for did in merged_doc_ids[:5]:
+                                try:
+                                    subgraph = neo4j_client.get_citing_documents(did, hops=2)
+                                    for node in subgraph.get("nodes", []):
+                                        ndid = node.get("doc_id", "")
+                                        if ndid and ndid not in added:
+                                            graph_expanded_ids.append(ndid)
+                                            added.add(ndid)
+                                except Exception:
+                                    pass
+                        status_e.update(label=f"🕸️ **Graph traversal** — {len(graph_expanded_ids)} dokumen terkait", state="complete", expanded=False)
+
+                    # ── Phase F: Re-ranking ALL candidates ───────────
+                    with progress_container.status("🏆 **Re-ranking dokumen …**", expanded=True) as status_f:
+                        all_candidate_ids = merged_doc_ids + graph_expanded_ids
+                        doc_summaries: dict[str, str] = {}
+
+                        for did in all_candidate_ids:
+                            summary = ""
+                            if did in semantic_chunks_by_doc:
+                                summary = semantic_chunks_by_doc[did][0].get("content", "")
+                            if not summary:
+                                vdb_chunks = pinecone_client.fetch_by_doc_id(did, top_k=3)
+                                if vdb_chunks:
+                                    summary = vdb_chunks[0].get("content", "")
+                            if not summary and neo4j_ok:
+                                try:
+                                    detail = neo4j_client.get_document_detail(did)
+                                    pasals = detail.get("pasals", [])
+                                    if pasals:
+                                        texts = [p.get("content", "") or p.get("name", "") for p in pasals[:3]]
+                                        summary = " ".join(t for t in texts if t)
+                                except Exception:
+                                    pass
+                            doc_summaries[did] = summary[:500] if summary else ""
+
+                        ranked = llm_stance.rerank_documents(query, doc_summaries)
+
+                        # Keep docs scoring >= 3, max 7
+                        primary_doc_ids = [did for did, score in ranked if score >= 3.0][:7]
+
+                        # Ensure graph + regex picks are always included
+                        for did in list(graph_doc_ids[:5]) + list(regex_doc_ids):
+                            if did not in primary_doc_ids:
+                                primary_doc_ids.append(did)
+
+                        if not primary_doc_ids:
+                            primary_doc_ids = merged_doc_ids[:5]
+                        status_f.update(label=f"🏆 **Re-rank** — top {len(primary_doc_ids)} dokumen", state="complete", expanded=False)
+
+            st.session_state.search_doc_ids = primary_doc_ids
+            st.session_state.search_results = raw_results
+
+            # ── Phase G: Content Assembly (VDB + Neo4j) ──────────────
+            with progress_container.status("📖 **Mengumpulkan konten dokumen …**", expanded=True) as status_g:
                 context_docs: dict[str, dict] = {}
                 seen_chunk_ids: set[str] = set()
 
@@ -983,8 +1072,12 @@ with tab_search:
                         context_docs[rdid] = {"source": "Neo4j (Related)", "chunks": chunks}
 
                 st.session_state.search_context_docs = context_docs
+                status_g.update(label=f"📖 **Konten** — {len(context_docs)} dokumen dikumpulkan", state="complete", expanded=False)
 
-                # ── Phase H: Context Building & Answer ───────────────────
+            # ── Phase H: Context Building & Answer ───────────────────
+            with progress_container.status("💡 **Menghasilkan jawaban dengan GPT …**", expanded=True) as status_h:
+                # G.5: Round-robin interleave ensures every doc is
+                # represented in the LLM context (max 30 chunks / 12k chars)
 
                 llm_chunks = _build_interleaved_context(
                     primary_doc_ids=primary_doc_ids,
@@ -994,13 +1087,13 @@ with tab_search:
                     max_chars=12000,
                 )
 
-                with st.spinner("Menghasilkan jawaban dengan GPT ..."):
-                    answer = llm_stance.ask_about_documents(query, llm_chunks)
-                    st.session_state.search_answer = answer
+                answer = llm_stance.ask_about_documents(query, llm_chunks)
+                st.session_state.search_answer = answer
+                status_h.update(label="💡 **Jawaban** — selesai", state="complete", expanded=False)
 
-            except Exception as e:
-                st.error(f"Error: {e}")
-                st.session_state.search_answer = None
+        except Exception as e:
+            st.error(f"Error: {e}")
+            st.session_state.search_answer = None
 
     # Display answer
     if st.session_state.search_answer:

@@ -310,6 +310,74 @@ Output HANYA JSON array, tanpa teks lain."""
         return [(did, 5.0) for did in doc_summaries]
 
 
+# ── LLM-powered sufficiency check (early-exit gate) ─────────────────────────
+
+def judge_sufficiency(query: str, doc_ids: list[str], doc_summaries: dict[str, str]) -> bool:
+    """Ask the LLM whether the current candidate documents are sufficient to answer the query.
+
+    Used as an early-exit gate: if the LLM judges the documents are enough,
+    the pipeline can skip expensive downstream phases (VDB expansion, graph
+    traversal, re-ranking).
+
+    Parameters
+    ----------
+    query : str
+        The user's legal question.
+    doc_ids : list[str]
+        Candidate document IDs found so far.
+    doc_summaries : dict[str, str]
+        Mapping of doc_id → representative text snippet.
+
+    Returns
+    -------
+    bool
+        True if the LLM deems the documents sufficient; False otherwise.
+        Defaults to False on any error (conservative: proceed with full pipeline).
+    """
+    if not doc_ids or not doc_summaries:
+        return False
+
+    client = get_llm_client()
+
+    summary_parts = []
+    for did in doc_ids:
+        snippet = doc_summaries.get(did, "")[:300] or "(kosong)"
+        summary_parts.append(f"- {did}: {snippet}")
+    doc_list_str = "\n".join(summary_parts)
+
+    system_prompt = """Kamu adalah pakar hukum Indonesia. Tugasmu HANYA menilai apakah DAFTAR DOKUMEN yang diberikan sudah CUKUP untuk menjawab pertanyaan hukum pengguna.
+
+Kriteria CUKUP:
+1. Dokumen mencakup regulasi utama yang mengatur topik pertanyaan (UU pokok, PP pelaksana, atau Permen teknis).
+2. Substansi dokumen relevan langsung dengan pertanyaan — bukan hanya topik umum yang sama.
+3. Jika pertanyaan merujuk regulasi spesifik (misal "PP 34/2021"), regulasi tersebut HARUS ada dalam daftar.
+
+Kriteria BELUM CUKUP:
+1. Dokumen yang ada tidak langsung mengatur topik pertanyaan.
+2. Masih diperlukan regulasi pelaksana atau regulasi terkait yang belum ada.
+3. Pertanyaan bersifat komparatif atau lintas-regulasi tetapi hanya ada satu sisi.
+
+Jawab HANYA dengan satu kata: CUKUP atau BELUM"""
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": (
+                    f"Pertanyaan: {query}\n\n"
+                    f"Dokumen yang ditemukan ({len(doc_ids)}):\n{doc_list_str}"
+                )},
+            ],
+            max_tokens=10,
+            temperature=0.1,
+        )
+        answer = (response.choices[0].message.content or "").strip().upper()
+        return "CUKUP" in answer and "BELUM" not in answer
+    except Exception:
+        return False  # Conservative: proceed with full pipeline
+
+
 def classify_stance(text_a: str, text_b: str, doc_a_id: str = "", doc_b_id: str = "") -> dict:
     """
     Classify the relationship between two legal text excerpts.
