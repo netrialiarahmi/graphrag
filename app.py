@@ -4,9 +4,20 @@ Streamlit app for visualizing and analyzing relationships between Indonesian leg
 """
 
 import streamlit as st
+import os
+
+# ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
+# On Streamlit Cloud there is no .env file. Secrets entered in the dashboard
+# (TOML format) are available via st.secrets.  We copy them into os.environ
+# so that every os.getenv() call in utils/* keeps working unchanged.
+if hasattr(st, "secrets") and len(st.secrets):
+    for key, value in st.secrets.items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # local .env still wins for local dev (already set → setdefault is no-op)
 
 import os, re, glob
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
