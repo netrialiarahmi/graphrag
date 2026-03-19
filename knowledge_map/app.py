@@ -359,7 +359,7 @@ def _build_graph(results: dict) -> tuple[list, list]:
         # Edge: doc -> cluster
         edges.append(Edge(
             source=did,
-            to=f"cluster_{ci}",
+            target=f"cluster_{ci}",
             color=color,
             width=1.5,
             smooth={"type": "continuous"},
@@ -375,7 +375,7 @@ def _build_graph(results: dict) -> tuple[list, list]:
             edge_color = "#2563eb" if rel == "CITES" else "#94a3b8"
             edges.append(Edge(
                 source=src,
-                to=tgt,
+                target=tgt,
                 label=rel,
                 color=edge_color,
                 width=1,
