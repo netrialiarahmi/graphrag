@@ -33,8 +33,10 @@ semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
 try:
+    import sqlite3 as _sqlite3
     from langgraph.checkpoint.sqlite import SqliteSaver
-    _checkpointer = SqliteSaver.from_conn_string(_MEMORY_DB)
+    _ckpt_conn = _sqlite3.connect(_MEMORY_DB, check_same_thread=False)
+    _checkpointer = SqliteSaver(_ckpt_conn)
 except Exception:
     _checkpointer = None
 

@@ -2,38 +2,60 @@
 
 > GraphRAG Legal Document Relationship Explorer  
 > Tab 1: "Search & Discover" (Tanya Jawab Regulasi)  
-> **v2 — LangGraph Agentic Router Architecture**
+> **v3 — LangGraph Agentic Router + Memory Architecture**
 
 ---
 
 ## Architecture Overview
 
 ```
-┌─────────────┐    ┌───────────────────────────────────────────┐
-│  Streamlit   │───▶│         LangGraph StateGraph              │
-│  (app.py)    │◀───│  ┌────────┐  ┌──────────┐  ┌──────────┐ │
-│              │    │  │ Router  │─▶│ Direct / │─▶│ Generate │ │
-│  • stream()  │    │  │  Node   │  │ Semantic/│  │  Answer  │ │
-│  • narratives│    │  │         │  │  Deep    │  │   Node   │ │
-│              │    │  └────────┘  └──────────┘  └──────────┘ │
-└─────────────┘    └───────────────────────────────────────────┘
-                          │              │              │
-                    ┌─────┴──────┐ ┌─────┴──────┐ ┌────┴─────┐
-                    │ OpenRouter  │ │  Pinecone  │ │  Neo4j   │
-                    │ (GPT-4.1)  │ │  (VDB)     │ │  Aura    │
-                    │ • route    │ │ • semantic │ │ • docs   │
-                    │ • suffice  │ │   search   │ │ • CITES  │
-                    │ • rerank   │ │ • fetch    │ │ • HIGHER │
-                    │ • answer   │ │ • 1024-dim │ │ • Pasal  │
-                    └────────────┘ └────────────┘ └──────────┘
-                                         ▲
-                                         │
-                                   ┌──────────────┐
-                                   │ HuggingFace  │
-                                   │ Indo-Legal   │
-                                   │ BERT-V3      │
-                                   │ (embedding)  │
-                                   └──────────────┘
+┌─────────────┐    ┌───────────────────────────────────────────────────────┐
+│  Streamlit   │───▶│              LangGraph StateGraph                    │
+│  (app.py)    │◀───│  ┌───────────┐  ┌────────┐  ┌──────────┐  ┌──────┐ │
+│              │    │  │ Summarize │─▶│ Router │─▶│ Direct / │─▶│ Gen  │ │
+│  • stream()  │    │  │IfNeeded   │  │  Node  │  │ Semantic/│  │Answer│ │
+│  • thread_id │    │  │ (memory)  │  │        │  │  Deep    │  │ Node │ │
+│  • narratives│    │  └───────────┘  └────────┘  └──────────┘  └──────┘ │
+└─────────────┘    └───────────────────────────────────────────────────────┘
+       │                     │              │              │
+       │               ┌─────┴──────┐ ┌─────┴──────┐ ┌────┴─────┐
+       │               │ OpenRouter  │ │  Pinecone  │ │  Neo4j   │
+       │               │ (Claude)   │ │  (VDB)     │ │  Aura    │
+       │               │ • route    │ │ • semantic │ │ • docs   │
+       │               │ • suffice  │ │   search   │ │ • CITES  │
+       │               │ • rerank   │ │ • fetch    │ │ • HIGHER │
+       │               │ • answer   │ │ • 1024-dim │ │ • Pasal  │
+       │               │ • summarize│ │            │ │          │
+       │               └────────────┘ └────────────┘ └──────────┘
+       │                                     ▲
+       │                                     │
+       │                               ┌──────────────┐
+       │                               │ HuggingFace  │
+       │                               │ Indo-Legal   │
+       │                               │ BERT-V3      │
+       │                               │ (embedding)  │
+       │                               └──────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────┐
+│         Persistence Layer                │
+│  ┌──────────────┐  ┌──────────────────┐  │
+│  │ SqliteSaver   │  │ SemanticMemory   │  │
+│  │ (checkpointer)│  │ (query log,      │  │
+│  │ • chat_history│  │  user context,   │  │
+│  │ • summary     │  │  conv titles)    │  │
+│  │ • thread_id   │  │                  │  │
+│  └──────────────┘  └──────────────────┘  │
+│            graphrag_memory.db            │
+└──────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────┐
+│  LangSmith (opt.)    │
+│  • Tracing           │
+│  • Evaluation        │
+│  • Prompt Management │
+└──────────────────────┘
 ```
 
 **Services:**
@@ -43,21 +65,32 @@
 | Neo4j Aura | Graph DB — documents, citations, hierarchy | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` |
 | Pinecone | Vector DB — semantic search over legal chunks | `PINECONE_API_KEY`, `PINECONE_INDEX` |
 | HuggingFace | Embedding endpoint — Indo-LegalBERT-V3 (1024-dim) | `HF_AUTH_TOKEN`, `HF_ENDPOINT_URL` |
-| OpenRouter | LLM gateway — GPT-4.1 for reasoning & routing | `OPENROUTER_API_KEY`, `LLM_MODEL` |
+| OpenRouter | LLM gateway — Claude Sonnet for reasoning & routing | `OPENROUTER_API_KEY`, `LLM_MODEL` |
 | OpenRouter (Router) | Optional separate model for routing decisions | `LLM_ROUTER_MODEL` (fallback: `LLM_MODEL`) |
+| SQLite | Persistence — checkpoints + semantic memory | `graphrag_memory.db` (auto-created) |
+| LangSmith (optional) | Observability — tracing, evaluation, prompt hub | `LANGSMITH_API_KEY`, `LANGCHAIN_PROJECT` |
+| AWS S3 | Document PDF storage — pre-signed URLs | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
 
 ---
 
 ## Pipeline Flow (LangGraph Agentic Router)
 
-The pipeline is implemented as a **LangGraph `StateGraph`** with conditional edges. Instead of a linear Phase A→B→C…→H pipeline with gate-based early exits, an LLM **Router Node** classifies each query into one of three routes (`direct`, `semantic`, `deep`) and dispatches to the appropriate processing node. Each node can escalate to a heavier route if its results are insufficient.
+The pipeline is implemented as a **LangGraph `StateGraph`** with conditional edges and **persistent memory**. An LLM **Router Node** classifies each query into one of three routes (`direct`, `semantic`, `deep`) and dispatches to the appropriate processing node. Each node can escalate to a heavier route if its results are insufficient.
+
+A **Summarize-If-Needed Node** serves as the entry point, condensing older conversation history to keep the context window manageable while preserving continuity across turns.
 
 ```mermaid
 flowchart TD
-    Q["🔍 User Question"] --> ROUTER
+    Q["🔍 User Question"] --> SUMMARIZE
+
+    subgraph "Summarize If Needed Node"
+        SUMMARIZE["If chat_history > 6 msgs:<br/>LLM summarizes older turns<br/>Keeps last 4 messages"]
+    end
+
+    SUMMARIZE --> ROUTER
 
     subgraph "Router Node"
-        ROUTER["1. Regex extraction<br/><code>extract_doc_ids_from_question()</code><br/>2. LLM JSON routing<br/><code>thought_process + route</code>"]
+        ROUTER["1. Regex extraction<br/><code>extract_doc_ids_from_question()</code><br/>2. Build conversation context<br/>3. LLM JSON routing<br/><code>thought_process + route</code>"]
     end
 
     ROUTER -- "regex hit → direct" --> DIRECT
@@ -120,22 +153,32 @@ class GraphState(TypedDict):
     answer: str                         # Final generated answer
     logs: List[str]                     # System debug logs
     narratives: List[str]               # User-facing legal explanations (Indonesian)
+    chat_history: List[dict]            # [{role: "user"|"assistant", content: str}]
+    summary: str                        # Condensed older conversation history
+    user_context: str                   # Injected semantic memory context
 ```
+
+**Memory fields explained:**
+- `chat_history` — rolling window of recent user/assistant turns (kept at most ~6 messages via summarization)
+- `summary` — LLM-condensed summary of older turns (generated when `chat_history > 6`)
+- `user_context` — auto-generated string from `SemanticMemory` describing frequent topics & docs the user has asked about
 
 ### Graph Edges (Routing Logic)
 
 ```python
 workflow = StateGraph(GraphState)
 
-# Nodes
+# Nodes (6 total)
+workflow.add_node("summarize_if_needed", summarize_if_needed_node)
 workflow.add_node("router", router_node)
 workflow.add_node("direct_lookup", direct_lookup_node)
 workflow.add_node("semantic_search", semantic_search_node)
 workflow.add_node("deep_research", deep_research_node)
 workflow.add_node("generate_answer", generate_answer_node)
 
-# Entry
-workflow.set_entry_point("router")
+# Entry — summarize first, then route
+workflow.set_entry_point("summarize_if_needed")
+workflow.add_edge("summarize_if_needed", "router")
 
 # Router → one of three nodes
 workflow.add_conditional_edges("router", router_condition)
@@ -152,11 +195,32 @@ workflow.add_conditional_edges("semantic_search", route_after_semantic)
 # Deep always → answer
 workflow.add_edge("deep_research", "generate_answer")
 workflow.add_edge("generate_answer", END)
+
+# Optional checkpointer for conversation persistence
+compile_kwargs = {}
+if checkpointer is not None:
+    compile_kwargs["checkpointer"] = checkpointer
+return workflow.compile(**compile_kwargs)
 ```
 
 ---
 
 ## Node-by-Node Detail
+
+### Summarize-If-Needed Node — `summarize_if_needed_node()`
+
+| Step | Function | Module | Service | Cost |
+|------|----------|--------|---------|------|
+| 1. Check history length | `len(chat_history) > 6` | `langgraph_agent` | Local | Free |
+| 2. Summarize older turns | `summarize_conversation(chat_history, existing_summary)` | `llm_stance` | OpenRouter | ~300 tokens |
+
+**Entry point** of the graph. Runs before every query to manage conversation context window:
+- If `chat_history` has ≤ 6 messages, passes through unchanged
+- If > 6 messages, calls `summarize_conversation()` to condense older turns into 3-5 sentences (Indonesian)
+- Keeps the last 4 messages intact for immediate context
+- Updates `summary` field in state
+
+This prevents unbounded context growth while maintaining conversation continuity.
 
 ### Router Node — `router_node()`
 
@@ -167,7 +231,7 @@ workflow.add_edge("generate_answer", END)
 
 **Step 1:** Parses explicit references like "PP 34/2021" → `PP-NASIONAL-34-2021` using 10 regex patterns. If a regex hit is found, the route is immediately set to `"direct"` without calling the LLM.
 
-**Step 2:** If no regex hit, the LLM receives the query and returns a **JSON object** with two keys:
+**Step 2:** If no regex hit, the LLM receives the query **plus conversation context** (summary + recent turns from `_build_history_context()`) and returns a **JSON object** with two keys:
 
 ```json
 {
@@ -269,7 +333,8 @@ Neo4j Pasal/Ayat content is **always** fetched for all primary documents. A `see
 | Step | Function | Module | Service | Cost |
 |------|----------|--------|---------|------|
 | 1. Interleave context | `_build_interleaved_context()` | `langgraph_agent` | Local | Free |
-| 2. Generate answer | `ask_about_documents(query, chunks, relationship_context)` | `llm_stance` | OpenRouter GPT-4.1 | ~1500-2000 tokens |
+| 2. Generate answer | `ask_about_documents(query, chunks, rel_ctx, chat_history, summary, user_context)` | `llm_stance` | OpenRouter | ~1500-2000 tokens |
+| 3. Update chat history | Append user query + truncated answer to `chat_history` | `langgraph_agent` | Local | Free |
 
 **Step 1 — Round-Robin Interleave:**
 1. Group all chunks by `doc_id`
@@ -277,11 +342,15 @@ Neo4j Pasal/Ayat content is **always** fetched for all primary documents. A `see
 3. Round-robin: take 1 chunk from each doc in turn
 4. Stop at **30 chunks** or **12,000 characters**
 
-**Step 2 — Answer Generation:** GPT-4.1 synthesizes the answer from interleaved context + relationship graph. The system prompt includes:
+**Step 2 — Answer Generation:** The LLM synthesizes the answer from interleaved context + relationship graph. The prompt now includes:
+- **Conversation history section** (`[Riwayat Percakapan]`): summary + last 6 messages for continuity
+- **User context section** (`[Konteks Pengguna]`): frequent topics/docs from SemanticMemory
 - **Anti-"Tidak" bias guard:** Prevents the LLM from defaulting to "No" on regulatory relationship questions
 - **Relationship awareness:** Uses CITES/HIGHER edges to infer connections between regulations
 - **Exception/limitation checking:** Checks for exception clauses
 - Start with firm conclusion, cite specific Pasal & Ayat
+
+**Step 3 — History Update:** After generating the answer, appends the current user query and a truncated version of the answer (500 chars) to `chat_history` in the state. This enables the next turn's `summarize_if_needed` and `router` nodes to leverage conversation context.
 
 ### Relationship Visualization (UI only)
 
@@ -295,23 +364,69 @@ After the answer is displayed, an interactive graph visualization shows the **su
 
 ## Streamlit Integration (app.py)
 
-The LangGraph agent is executed via `agent.stream()`, which yields state updates per node:
+The LangGraph agent is executed via `agent.stream()` with **thread-based checkpointing** and **semantic memory**:
 
 ```python
 from utils.langgraph_agent import create_agent
+from utils.memory import SemanticMemory
+from langgraph.checkpoint.sqlite import SqliteSaver
+import sqlite3
 
-agent = create_agent()
-for event in agent.stream({"query": query, "logs": [], "narratives": [], "primary_doc_ids": []}):
+# Persistence (module-level, shared across reruns)
+conn = sqlite3.connect("graphrag_memory.db", check_same_thread=False)
+checkpointer = SqliteSaver(conn)
+memory = SemanticMemory("graphrag_memory.db")
+
+# Per-query execution
+agent = create_agent(checkpointer=checkpointer)
+user_ctx = memory.get_user_context_prompt()
+
+for event in agent.stream(
+    {
+        "query": query,
+        "logs": [], "narratives": [], "primary_doc_ids": [],
+        "chat_history": st.session_state.chat_history,
+        "summary": st.session_state.summary,
+        "user_context": user_ctx,
+    },
+    config={"configurable": {"thread_id": st.session_state.active_conv_id}},
+):
     for node_name, state_update in event.items():
         final_state.update(state_update)
         # Stream new narratives live to user
         for nar in state_update.get("narratives", [])[seen_narratives:]:
             st.markdown(f"💭 *{nar}*")
+
+# After answer: log to semantic memory
+memory.log_query(query=prompt, doc_ids=cited_ids, route=route, latency=latency)
+memory.save_conversation_title(conv_id, title)
 ```
+
+### Memory Architecture
+
+| Scope | Storage | Purpose | Lifecycle |
+|-------|---------|---------|----------|
+| Conversation Memory | LangGraph SqliteSaver (checkpointer) | `chat_history` per thread_id | Persists across browser reloads |
+| Summary Memory | `summary` field in GraphState | Condensed older turns (>6 msgs) | Updated each turn by `summarize_if_needed` |
+| Semantic Memory | `SemanticMemory` SQLite tables | Query log, frequent topics/docs, user preferences | Persists forever |
+| Cross-Session Memory | `conv_title:*` keys in semantic_memory table | Sidebar conversation history | Persists forever |
+
+**Single SQLite file:** Both `SqliteSaver` (checkpointer tables) and `SemanticMemory` (query_log, semantic_memory tables) share `graphrag_memory.db`.
+
+### LangSmith Integration (optional)
+
+```python
+from utils.langsmith_config import init_langsmith
+init_langsmith()  # No-op if LANGSMITH_API_KEY not set
+```
+
+- **Tracing:** All LangGraph runs are traced when API key is present
+- **Graceful degradation:** App works identically without LangSmith
+- **Environment variables:** `LANGSMITH_API_KEY`, `LANGCHAIN_PROJECT` (default: `graphrag-legal`)
 
 **Narrative UI:** Each node appends Indonesian-language "thoughts" to `state["narratives"]`. These are rendered live in the Streamlit UI as the pipeline progresses, giving the user insight into the legal reasoning without exposing technical details.
 
-**Debug Logs:** Raw system logs are available in an expandable `⚙️ System Debug Logs` section.
+**Debug Logs:** Raw system logs are available in an expandable `⚙️ Catatan Teknis` section.
 
 ---
 
@@ -367,14 +482,16 @@ for event in agent.stream({"query": query, "logs": [], "narratives": [], "primar
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `router_node(state)` | `(GraphState) → GraphState` | Regex + LLM JSON routing → sets `route` |
+| `summarize_if_needed_node(state)` | `(GraphState) → GraphState` | Condense chat_history if >6, update summary |
+| `router_node(state)` | `(GraphState) → GraphState` | Regex + history context + LLM JSON routing → sets `route` |
 | `direct_lookup_node(state)` | `(GraphState) → GraphState` | Neo4j catalog lookup, fallback to semantic |
 | `semantic_search_node(state)` | `(GraphState) → GraphState` | VDB top-20 + JSON sufficiency check, escalate to deep |
 | `deep_research_node(state)` | `(GraphState) → GraphState` | Expand + multi-VDB + graph traversal + rerank |
-| `generate_answer_node(state)` | `(GraphState) → GraphState` | Interleave + GPT-4.1 answer |
+| `generate_answer_node(state)` | `(GraphState) → GraphState` | Interleave + LLM answer + update chat_history |
+| `_build_history_context(state)` | `(GraphState) → str` | Build compact context from summary + last 6 messages |
 | `_assemble_context_for_state(state, raw_vdb_hits)` | `(GraphState, list?) → GraphState` | Shared: VDB + Neo4j Pasal + edges assembly |
 | `_build_interleaved_context(primary, related, context_docs, max_chunks, max_chars)` | `(list, list, dict, int, int) → list[dict]` | Round-robin interleave, 30 chunks / 12k chars |
-| `create_agent()` | `() → CompiledGraph` | Build & compile the LangGraph workflow |
+| `create_agent(checkpointer)` | `(BaseCheckpointSaver?) → CompiledGraph` | Build & compile with optional checkpointer |
 
 ### `utils/llm_stance.py`
 
@@ -385,7 +502,8 @@ for event in agent.stream({"query": query, "logs": [], "narratives": [], "primar
 | `expand_query(query)` | `(str) → list[str]` | 3-5 synonym search phrases |
 | `smart_doc_lookup(query, all_docs)` | `(str, list[dict]) → list[str]` | LLM picks ≤10 doc_ids from Neo4j catalog |
 | `rerank_documents(query, doc_summaries)` | `(str, dict[str,str]) → list[tuple[str,float]]` | LLM scores docs 0-10, sorted descending |
-| `ask_about_documents(query, context_chunks, relationship_context)` | `(str, list[dict], str) → str` | RAG answer generation with Pasal citations + graph context |
+| `ask_about_documents(query, chunks, rel_ctx, chat_history, summary, user_context)` | `(str, list, str, list?, str, str) → str` | RAG answer with conversation context + user memory |
+| `summarize_conversation(chat_history, existing_summary)` | `(list[dict], str) → str` | Condense conversation to 3-5 sentences (Indonesian) |
 
 ### `utils/pinecone_client.py`
 
@@ -412,6 +530,27 @@ for event in agent.stream({"query": query, "logs": [], "narratives": [], "primar
 | `extract_doc_ids_from_question(question)` | `(str) → set[str]` | Regex-parse doc references from query text |
 | `get_unique_doc_ids(results, max_docs)` | `(list[dict], int) → list[str]` | Unique doc_ids from VDB results |
 
+### `utils/memory.py`
+
+| Function / Class | Signature | Purpose |
+|------------------|-----------|---------|
+| `SemanticMemory(db_path)` | `(str) → SemanticMemory` | SQLite-backed query log & user context |
+| `.log_query(query, doc_ids, topic, route, latency)` | `(str, list?, str, str, float) → None` | Log each answered query |
+| `.get_recent_queries(n)` | `(int) → list[dict]` | Last N queries with metadata |
+| `.get_frequent_topics(n)` | `(int) → list[str]` | Most common query topics |
+| `.get_frequent_docs(n)` | `(int) → list[str]` | Most referenced doc_ids |
+| `.get_user_context_prompt()` | `() → str` | Build LLM-injectable user context string |
+| `.set/get_preference(key, value)` | `(str, str) → None/str` | Arbitrary key-value preferences |
+| `.save_conversation_title(conv_id, title)` | `(str, str) → None` | Persist conversation title for sidebar |
+| `.get_all_conversation_titles()` | `() → list[dict]` | All saved conversations (for sidebar history) |
+
+### `utils/langsmith_config.py`
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `init_langsmith()` | `() → bool` | Activate LangSmith tracing if API key set |
+| `get_traceable()` | `() → Callable` | Return `@traceable` decorator or no-op |
+
 ---
 
 ## Routing & Escalation Logic
@@ -432,7 +571,7 @@ if no_docs_found:
 if not LLM_JSON_response["is_sufficient"]:
     route = "deep"  # Escalate
 
-# Deep Node — always proceeds to answer
+# Deep Nodpip3 install langgraph && python3 -m streamlit run app.pypip3 install langgraph && python3 -m streamlit run app.pye — always proceeds to answer
 # (no further escalation possible)
 ```
 
@@ -446,15 +585,18 @@ if not LLM_JSON_response["is_sufficient"]:
 
 ## Migration from v1 (Linear Pipeline)
 
-| v1 (Linear Pipeline) | v2 (LangGraph Agentic Router) |
-|-----------------------|-------------------------------|
-| Phase A→B→Gate1→C→D→Gate2→E→F→G→H | Router → Direct/Semantic/Deep → Answer |
-| `judge_sufficiency()` returns `CUKUP`/`BELUM` | JSON `{"is_sufficient": bool, "thought_process": "..."}` |
-| 2 gates (hardcoded positions) | 1 sufficiency check (in Semantic node only) |
-| All logic in `app.py` (~350 lines) | Logic in `utils/langgraph_agent.py` (~350 lines) |
-| No user-facing reasoning | Live narrative streaming ("Saya sedang menganalisis...") |
-| `_build_interleaved_context()` in `app.py` | `_build_interleaved_context()` in `langgraph_agent.py` |
-| 40 chunks / 16k chars cap | 30 chunks / 12k chars cap |
-| Gate 1: Neo4j summaries, Gate 2: VDB summaries | Single JSON sufficiency check with VDB excerpts |
-| Fixed `top_k=30` (lite) / `top_k=100` (full) | `top_k=20` (semantic) / `top_k=25×3` (deep) |
-| Max 7 primary docs | Max 5 primary docs (deep) / 3 (direct) / 5 (semantic) |
+| v1 (Linear Pipeline) | v2 (LangGraph Agentic Router) | v3 (+ Memory & Observability) |
+|-----------------------|-------------------------------|-------------------------------|
+| Phase A→B→Gate1→C→D→Gate2→E→F→G→H | Router → Direct/Semantic/Deep → Answer | Summarize → Router → Direct/Semantic/Deep → Answer |
+| `judge_sufficiency()` returns `CUKUP`/`BELUM` | JSON `{"is_sufficient": bool, "thought_process": "..."}` | Same + robust JSON fallback (regex extraction) |
+| 2 gates (hardcoded positions) | 1 sufficiency check (in Semantic node only) | Same |
+| All logic in `app.py` (~350 lines) | Logic in `utils/langgraph_agent.py` (~350 lines) | + `utils/memory.py`, `utils/langsmith_config.py` |
+| No user-facing reasoning | Live narrative streaming ("Saya sedang menganalisis...") | + conversation context in routing |
+| `_build_interleaved_context()` in `app.py` | `_build_interleaved_context()` in `langgraph_agent.py` | Same |
+| 40 chunks / 16k chars cap | 30 chunks / 12k chars cap | Same |
+| Gate 1: Neo4j summaries, Gate 2: VDB summaries | Single JSON sufficiency check with VDB excerpts | Same |
+| Fixed `top_k=30` (lite) / `top_k=100` (full) | `top_k=20` (semantic) / `top_k=25×3` (deep) | Same |
+| Max 7 primary docs | Max 5 primary docs (deep) / 3 (direct) / 5 (semantic) | Same |
+| No persistence | No persistence (session_state only) | SQLite persistence + LangGraph checkpointer |
+| No memory | No memory | 4-scope memory (conversation, summary, semantic, cross-session) |
+| No observability | No observability | LangSmith tracing (optional) |
