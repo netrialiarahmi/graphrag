@@ -1,12 +1,10 @@
-# Root requirements (installs everything for both apps)
-# Per-app requirements: chatbot/requirements.txt, knowledge_map/requirements.txt
+# Chatbot – GraphRAG Legal AI
 streamlit>=1.30.0
 neo4j>=5.0.0
 pinecone>=5.0.0
 openai>=1.10.0
 streamlit-agraph>=0.0.45
 python-dotenv>=1.0.0
-openpyxl>=3.1.0
 requests>=2.28.0
 langgraph>=0.3.0
 langgraph-checkpoint-sqlite>=2.0.0

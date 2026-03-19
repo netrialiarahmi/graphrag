@@ -6,8 +6,13 @@ Query → Semantic Search → Topic Clustering → Interactive Graph → PDF Acc
 """
 
 import streamlit as st
-import os, json, re, time
+import os, sys, json, re, time
 from datetime import datetime
+
+# -- Resolve project root so shared/ is importable
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # -- Streamlit Cloud: inject secrets into env vars
 try:
@@ -23,7 +28,7 @@ load_dotenv()
 
 import boto3
 from streamlit_agraph import agraph, Node, Edge, Config
-from utils import neo4j_client, pinecone_client, llm_stance
+from shared import neo4j_client, pinecone_client, llm_stance
 
 # -- Page Config
 st.set_page_config(

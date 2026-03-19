@@ -2,11 +2,17 @@
 LangGraph Agentic RAG implementation for GraphRAG.
 Supports JSON-based Chain of Thought routing with user-friendly narratives.
 """
-import os
+import os, sys
 import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
-from utils import neo4j_client, pinecone_client, llm_stance
+
+# Resolve project root so shared/ is importable
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from shared import neo4j_client, pinecone_client, llm_stance
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
 
 class GraphState(TypedDict):

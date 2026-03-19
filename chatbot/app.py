@@ -4,8 +4,13 @@ ChatGPT-style interface for Indonesian legal document analysis.
 """
 
 import streamlit as st
-import os, time, re, uuid
+import os, sys, time, re, uuid
 from datetime import datetime
+
+# ── Resolve project root so shared/ is importable ────────────────────────────
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
 try:
@@ -20,8 +25,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import boto3
-from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
-from utils.langsmith_config import init_langsmith
+from shared import neo4j_client, pinecone_client, llm_stance
+from shared.langsmith_config import init_langsmith
+from utils import graph_viz
 from utils.memory import SemanticMemory
 
 # ── LangSmith tracing (graceful degradation) ─────────────────────────────────
@@ -601,7 +607,7 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
     with st.chat_message("assistant", avatar="\u2696\uFE0F"):
         _t_start = time.time()
         try:
-            from utils.langgraph_agent import create_agent
+            from utils.langgraph_agent import create_agent  # chatbot/utils/
 
             with st.status("Menganalisis pertanyaan hukum...", expanded=True) as status:
                 agent = create_agent(checkpointer=_checkpointer)

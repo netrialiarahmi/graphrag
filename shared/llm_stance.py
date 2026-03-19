@@ -6,7 +6,7 @@ import functools
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
-from utils.langsmith_config import get_traceable
+from shared.langsmith_config import get_traceable
 
 traceable = get_traceable()
 
