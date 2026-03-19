@@ -27,9 +27,10 @@ load_dotenv()
 import os, re, glob
 import pandas as pd
 import altair as alt
+import boto3
 from shared import neo4j_client, pinecone_client, llm_stance
 from utils import graph_viz
-from utils.knowledge_graph import parse_dasar_hukum, detect_conflicts, build_answer_graph
+from utils.knowledge_graph import parse_dasar_hukum, detect_conflicts, build_answer_graph, get_level_legend, get_node_color
 from streamlit_agraph import agraph, Config
 
 # -- Page Config ---------------------------------------------------------------
@@ -368,23 +369,152 @@ st.markdown("""
     .stance-doc { font-weight: 600; font-size: 0.82rem; color: #1e293b; }
     .stance-reason { font-size: 0.78rem; color: #64748b; flex: 1; }
 
-    /* ── Knowledge Map Legend ─────────────────────────────────────────────── */
-    .km-legend {
-        display: flex; gap: 20px; align-items: center;
-        padding: 10px 16px; background: #f8fafc;
+    /* ── Knowledge Map: Wrapper ─────────────────────────────────────────── */
+    .km-wrapper {
+        background: #fafbfe;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 1.25rem 1.5rem;
+        margin-top: 0.5rem;
+    }
+
+    /* ── Knowledge Map: Stat Bar ──────────────────────────────────────────── */
+    .km-stat-bar {
+        display: flex; gap: 10px; flex-wrap: wrap;
+        margin-bottom: 14px;
+    }
+    .km-stat-item {
+        display: inline-flex; align-items: center; gap: 6px;
+        background: #ffffff; border: 1px solid #e2e8f0; border-radius: 20px;
+        padding: 5px 14px; font-size: 0.75rem; font-weight: 500; color: #475569;
+    }
+    .km-stat-count {
+        font-weight: 700; font-size: 0.72rem;
+        padding: 2px 8px; border-radius: 10px;
+        color: #fff;
+    }
+
+    /* ── Knowledge Map: Color Legend ──────────────────────────────────────── */
+    .km-color-legend {
+        display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        padding: 10px 14px; background: #ffffff;
+        border: 1px solid #e2e8f0; border-radius: 10px;
+        margin-bottom: 10px;
+    }
+    .km-color-legend-title {
+        font-size: 0.68rem; text-transform: uppercase; letter-spacing: 1px;
+        font-weight: 700; color: #94a3b8; margin-right: 4px;
+    }
+    .km-color-item {
+        display: inline-flex; align-items: center; gap: 5px;
+        font-size: 0.72rem; color: #475569; font-weight: 500;
+    }
+    .km-color-swatch {
+        width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0;
+    }
+
+    /* ── Knowledge Map: Edge Legend ───────────────────────────────────────── */
+    .km-edge-legend {
+        display: flex; gap: 16px; align-items: center;
+        padding: 8px 14px; background: #ffffff;
         border: 1px solid #e2e8f0; border-radius: 10px;
         margin-bottom: 12px;
     }
-    .km-legend-item {
+    .km-edge-item {
         display: inline-flex; align-items: center; gap: 6px;
-        font-size: 0.75rem; color: #475569; font-weight: 500;
+        font-size: 0.72rem; color: #475569; font-weight: 500;
     }
-    .km-legend-line {
-        width: 28px; height: 0; border-top-style: solid;
+    .km-edge-line { width: 24px; height: 0; }
+    .km-edge-line.cites { border-top: 2px solid #2563eb; }
+    .km-edge-line.higher { border-top: 2px dashed #94a3b8; }
+    .km-edge-line.conflict { border-top: 3px solid #dc2626; }
+
+    /* ── Knowledge Map: Doc Detail Card ──────────────────────────────────── */
+    .km-doc-detail {
+        border: 1px solid #e2e8f0; border-radius: 12px;
+        padding: 16px 18px; background: #ffffff;
+        position: relative; overflow: hidden;
     }
-    .km-legend-line.cites { border-top: 2px solid #2563eb; }
-    .km-legend-line.higher { border-top: 2px dashed #94a3b8; }
-    .km-legend-line.conflict { border-top: 4px solid #dc2626; }
+    .km-doc-detail::before {
+        content: "";
+        position: absolute; left: 0; top: 0; bottom: 0;
+        width: 4px; border-radius: 4px 0 0 4px;
+    }
+    .km-doc-header {
+        display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+    }
+    .km-doc-title {
+        font-weight: 700; font-size: 1rem; color: #0f172a;
+    }
+    .km-doc-type-badge {
+        font-size: 0.65rem; font-weight: 600; color: #fff;
+        padding: 3px 10px; border-radius: 12px;
+        text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .km-doc-id {
+        font-size: 0.73rem; color: #94a3b8; font-family: monospace;
+        margin-bottom: 10px;
+    }
+    .km-meta-row {
+        display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;
+    }
+    .km-meta-pill {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px;
+        padding: 4px 12px; font-size: 0.75rem; color: #475569;
+    }
+    .km-meta-pill strong { color: #1e293b; font-weight: 600; }
+
+    /* ── Knowledge Map: Chunk Card ────────────────────────────────────────── */
+    .km-chunk-card {
+        border: 1px solid #e2e8f0; border-left: 3px solid #2563eb;
+        border-radius: 0 8px 8px 0;
+        padding: 10px 14px; margin: 6px 0;
+        background: #ffffff; font-size: 0.82rem;
+        color: #334155; line-height: 1.55;
+    }
+    .km-chunk-scope {
+        font-size: 0.68rem; font-weight: 600; color: #2563eb;
+        background: #eff6ff; padding: 2px 8px; border-radius: 8px;
+        display: inline-block; margin-bottom: 6px;
+    }
+
+    /* ── Knowledge Map: Relation Row ─────────────────────────────────────── */
+    .km-relation-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 12px; border: 1px solid #f1f5f9; border-radius: 8px;
+        margin: 4px 0; background: #fff; transition: all 0.2s ease;
+        font-size: 0.82rem;
+    }
+    .km-relation-row:hover { background: #fafbfe; border-color: #e2e8f0; }
+    .km-relation-arrow { color: #94a3b8; font-size: 0.85rem; flex-shrink: 0; }
+    .km-relation-doc { font-weight: 600; color: #1e293b; }
+    .km-relation-type {
+        font-size: 0.68rem; color: #64748b; background: #f1f5f9;
+        padding: 2px 8px; border-radius: 10px; font-weight: 500;
+    }
+    .km-relation-type.conflict {
+        color: #dc2626; background: #fef2f2;
+    }
+
+    /* ── Knowledge Map: Doc List Item ─────────────────────────────────────── */
+    .km-doc-list-item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 10px;
+        margin: 5px 0; background: #ffffff; transition: all 0.2s ease;
+    }
+    .km-doc-list-item:hover {
+        border-color: #bfdbfe; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    .km-doc-dot {
+        width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0;
+    }
+    .km-doc-list-label {
+        font-weight: 600; font-size: 0.85rem; color: #0f172a; flex: 1;
+    }
+    .km-doc-list-year {
+        font-size: 0.72rem; color: #94a3b8; font-weight: 500;
+    }
 
     /* ── Footer ──────────────────────────────────────────────────────────── */
     .app-footer {
@@ -501,6 +631,8 @@ if "km_conflicts" not in st.session_state:
     st.session_state.km_conflicts = []
 if "km_doc_ids" not in st.session_state:
     st.session_state.km_doc_ids = []
+if "km_selected_node" not in st.session_state:
+    st.session_state.km_selected_node = None
 
 # -- Connection checks (cached per session) ------------------------------------
 neo4j_ok = neo4j_client.test_connection()
@@ -571,6 +703,37 @@ def render_stance_row(src: str, tgt: str, stance_result: dict):
         <span class="stat-pill">{confidence:.0%}</span>
     </div>
     """, unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _s3_presigned_url(doc_id: str) -> str | None:
+    try:
+        region = os.getenv("AWS_REGION", "ap-southeast-3")
+        bucket = os.getenv("S3_BUCKET", "s3-lexport-dev-v1")
+        directory = os.getenv("S3_DIRECTORY", "neo4j-dev")
+        key = f"{directory}/{doc_id}.pdf"
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=region,
+            endpoint_url=f"https://s3.{region}.amazonaws.com",
+        )
+        s3.head_object(Bucket=bucket, Key=key)
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=3600,
+        )
+    except Exception:
+        return None
+
+
+def _doc_short_label(doc_id: str) -> str:
+    parts = doc_id.split("-")
+    if len(parts) >= 4:
+        return f"{parts[0]} {parts[2]}/{parts[3]}"
+    return doc_id[:30]
 
 
 # ── Benchmark helpers — imported from shared module ──────────────────────────
@@ -664,7 +827,7 @@ with tab_search:
             from utils.langgraph_agent import create_agent
 
             with progress_container.status(
-                '<span class="status-icon processing">&#9670;</span> **Memutar Strategi Penelusuran Hukum...**',
+                "Memutar Strategi Penelusuran Hukum...",
                 expanded=True,
             ) as status:
                 agent = create_agent()
@@ -677,11 +840,11 @@ with tab_search:
                         curr_narr = state_update.get("narratives", [])
                         if len(curr_narr) > seen_narratives:
                             for nar in curr_narr[seen_narratives:]:
-                                st.markdown(f'<span class="status-icon thought">&bull;</span> *{nar}*', unsafe_allow_html=True)
+                                st.markdown(f"--- *{nar}*")
                             seen_narratives = len(curr_narr)
 
                 status.update(
-                    label='<span class="status-icon done">&#10003;</span> **Analisis Hukum Selesai**',
+                    label="Analisis Hukum Selesai",
                     state="complete",
                     expanded=False,
                 )
@@ -690,6 +853,7 @@ with tab_search:
                 st.session_state.search_context_docs = final_state.get("context_docs", {})
                 st.session_state.search_answer = final_state.get("answer", "")
                 st.session_state.search_edges = {"edges": []}
+                st.session_state.km_selected_node = None
 
                 # ── Knowledge Map: parse & build ─────────────────────────────
                 answer_text = st.session_state.search_answer or ""
@@ -735,56 +899,194 @@ with tab_search:
         km_neo4j_edges = st.session_state.km_neo4j_edges
         km_conflicts = st.session_state.km_conflicts
 
-        # Legend
-        st.markdown("""
-        <div class="km-legend">
-            <div class="km-legend-item">
-                <span class="km-legend-line cites"></span> CITES (mengutip)
-            </div>
-            <div class="km-legend-item">
-                <span class="km-legend-line higher"></span> HIGHER (hierarki)
-            </div>
-            <div class="km-legend-item">
-                <span class="km-legend-line conflict"></span> KONFLIK (bertentangan)
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Stat bar
+        n_cites = sum(1 for e in km_neo4j_edges if e.get("type") == "CITES")
+        n_higher = sum(1 for e in km_neo4j_edges if e.get("type") == "HIGHER")
+        n_conflict = len(km_conflicts)
+        st.markdown(
+            f'<div class="km-stat-bar">'
+            f'<span class="km-stat-item"><span class="km-stat-count" style="background:#1e3a5f">{len(km_ids)}</span> Dokumen</span>'
+            f'<span class="km-stat-item"><span class="km-stat-count" style="background:#2563eb">{n_cites}</span> Mengutip</span>'
+            f'<span class="km-stat-item"><span class="km-stat-count" style="background:#94a3b8">{n_higher}</span> Hierarki</span>'
+            f'<span class="km-stat-item"><span class="km-stat-count" style="background:#dc2626">{n_conflict}</span> Konflik</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Build and render graph
-        nodes, edges = build_answer_graph(km_ids, km_neo4j_edges, km_conflicts)
+        # Color-coded hierarchy legend (dynamic — only levels present)
+        legend_items = get_level_legend(km_ids)
+        color_html = "".join(
+            f'<span class="km-color-item">'
+            f'<span class="km-color-swatch" style="background:{it["color"]}"></span>'
+            f'{it["name"]}'
+            f'</span>'
+            for it in legend_items
+        )
+        st.markdown(
+            f'<div class="km-color-legend">'
+            f'<span class="km-color-legend-title">Hierarki</span>'
+            f'{color_html}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-        if nodes:
-            config = Config(
-                width="100%",
-                height=450,
-                directed=True,
-                physics=False,
-                hierarchical=True,
-                direction="UD",
-                sortMethod="directed",
-                levelSeparation=120,
-                nodeSpacing=100,
-                treeSpacing=200,
-                nodeHighlightBehavior=True,
-                highlightColor="#2563eb",
-            )
-            agraph(nodes=nodes, edges=edges, config=config)
+        # Edge type legend
+        st.markdown(
+            '<div class="km-edge-legend">'
+            '<span class="km-edge-item"><span class="km-edge-line cites"></span> Mengutip</span>'
+            '<span class="km-edge-item"><span class="km-edge-line higher"></span> Hierarki</span>'
+            '<span class="km-edge-item"><span class="km-edge-line conflict"></span> Konflik</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-            # Stats
-            n_cites = sum(1 for e in km_neo4j_edges if e.get("type") == "CITES")
-            n_higher = sum(1 for e in km_neo4j_edges if e.get("type") == "HIGHER")
-            n_conflict = len(km_conflicts)
-            st.markdown(
-                f'<div style="display:flex;gap:12px;margin-top:8px;">'
-                f'<span class="stat-pill"><span class="stat-pill-count">{len(km_ids)}</span> Dokumen</span>'
-                f'<span class="stat-pill"><span class="stat-pill-count">{n_cites}</span> CITES</span>'
-                f'<span class="stat-pill"><span class="stat-pill-count">{n_higher}</span> HIGHER</span>'
-                f'<span class="stat-pill"><span class="stat-pill-count" style="background:#dc2626">{n_conflict}</span> KONFLIK</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("Tidak ada dokumen untuk divisualisasikan.")
+        col_graph, col_detail = st.columns([3, 2])
+
+        with col_graph:
+            # Build and render graph
+            nodes, edges = build_answer_graph(km_ids, km_neo4j_edges, km_conflicts)
+
+            if nodes:
+                config = Config(
+                    width="100%",
+                    height=550,
+                    directed=True,
+                    physics=False,
+                    hierarchical=True,
+                    direction="UD",
+                    sortMethod="directed",
+                    levelSeparation=150,
+                    nodeSpacing=120,
+                    treeSpacing=220,
+                    nodeHighlightBehavior=True,
+                    highlightColor="#2563eb",
+                )
+                selected_km_node = agraph(nodes=nodes, edges=edges, config=config)
+
+                if selected_km_node:
+                    st.session_state.km_selected_node = selected_km_node
+
+                st.caption("Klik node untuk melihat detail dokumen, kutipan relevan, dan PDF.")
+            else:
+                st.info("Tidak ada dokumen untuk divisualisasikan.")
+
+        with col_detail:
+            selected = st.session_state.km_selected_node
+
+            if selected and selected in km_ids:
+                # ── Detail card with hierarchy color accent ──
+                node_color = get_node_color(selected)
+                label = _doc_short_label(selected)
+
+                doc_info = {}
+                try:
+                    detail = neo4j_client.get_document_detail(selected)
+                    doc_info = detail.get("document", {})
+                except Exception:
+                    pass
+
+                jenis = doc_info.get("jenis", "-")
+                tahun = doc_info.get("tahun", "-")
+                nomor = doc_info.get("nomor", "-")
+                judul = doc_info.get("judul", "")
+
+                st.markdown(
+                    f'<div class="km-doc-detail" style="border-left:4px solid {node_color};">'
+                    f'<div class="km-doc-header">'
+                    f'<span class="km-doc-title">{label}</span>'
+                    f'<span class="km-doc-type-badge" style="background:{node_color}">{jenis}</span>'
+                    f'</div>'
+                    f'<div class="km-doc-id">{selected}</div>'
+                    f'<div class="km-meta-row">'
+                    f'<span class="km-meta-pill"><strong>Tahun</strong> {tahun}</span>'
+                    f'<span class="km-meta-pill"><strong>Nomor</strong> {nomor}</span>'
+                    f'</div>'
+                    + (f'<div style="font-size:0.85rem;color:#475569;font-style:italic;line-height:1.5;">{judul}</div>' if judul else "")
+                    + f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # PDF button
+                url = _s3_presigned_url(selected)
+                if url:
+                    st.link_button("Buka PDF", url, use_container_width=True, type="primary")
+                else:
+                    st.caption("PDF tidak tersedia di S3")
+
+                # ── Kutipan Relevan ──
+                ctx = st.session_state.search_context_docs.get(selected, {})
+                chunks = ctx.get("chunks", []) if isinstance(ctx, dict) else []
+                if chunks:
+                    st.markdown(f"**Kutipan Relevan** ({len(chunks)} fragmen)")
+                    for i, chunk in enumerate(chunks[:3]):
+                        content = chunk.get("content", "")[:350]
+                        scope = chunk.get("scope", "")
+                        article = chunk.get("article_id", "")
+                        scope_label = article if article else (scope if scope else f"Fragmen {i+1}")
+                        with st.expander(scope_label, expanded=(i == 0)):
+                            st.markdown(
+                                f'<div class="km-chunk-card">'
+                                + (f'<span class="km-chunk-scope">{scope_label}</span>' if scope_label else "")
+                                + f'<div>{content}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                # ── Relasi Hukum ──
+                related = []
+                for edge in km_neo4j_edges:
+                    src = edge.get("source_id", "")
+                    tgt = edge.get("target_id", "")
+                    rel = edge.get("type", "")
+                    if src == selected:
+                        related.append((tgt, _doc_short_label(tgt), rel, "\u2192"))
+                    elif tgt == selected:
+                        related.append((src, _doc_short_label(src), rel, "\u2190"))
+                for conf in km_conflicts:
+                    cs = conf.get("source", "")
+                    ct = conf.get("target", "")
+                    cl = conf.get("label", "KONFLIK")
+                    if cs == selected:
+                        related.append((ct, _doc_short_label(ct), f"KONFLIK: {cl}", "\u2192"))
+                    elif ct == selected:
+                        related.append((cs, _doc_short_label(cs), f"KONFLIK: {cl}", "\u2190"))
+
+                if related:
+                    st.markdown(f"**Relasi Hukum** ({len(related)})")
+                    for rdoc_id, rlabel, rel, direction in related:
+                        is_conflict = "KONFLIK" in rel
+                        type_cls = "conflict" if is_conflict else ""
+                        st.markdown(
+                            f'<div class="km-relation-row">'
+                            f'<span class="km-relation-arrow">{direction}</span>'
+                            f'<span class="km-relation-doc">{rlabel}</span>'
+                            f'<span class="km-relation-type {type_cls}">{rel}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if st.button(f"Lihat {rlabel}", key=f"nav_{rdoc_id}", use_container_width=True):
+                            st.session_state.km_selected_node = rdoc_id
+                            st.rerun()
+            else:
+                # ── No selection — compact doc list ──
+                st.markdown("**Dokumen Terkait**")
+                st.caption("Klik node di peta untuk melihat detail dan kutipan relevan.")
+                for did in km_ids:
+                    label = _doc_short_label(did)
+                    color = get_node_color(did)
+                    from utils.knowledge_graph import _extract_year
+                    year = _extract_year(did)
+                    st.markdown(
+                        f'<div class="km-doc-list-item">'
+                        f'<span class="km-doc-dot" style="background:{color}"></span>'
+                        f'<span class="km-doc-list-label">{label}</span>'
+                        + (f'<span class="km-doc-list-year">{year}</span>' if year else "")
+                        + f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    url = _s3_presigned_url(did)
+                    if url:
+                        st.link_button("Buka PDF", url, key=f"pdf_{did}", use_container_width=True)
 
 
 # ==============================================================================

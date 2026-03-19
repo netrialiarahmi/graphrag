@@ -10,55 +10,116 @@ from streamlit_agraph import Node, Edge
 from shared import neo4j_client, llm_stance
 
 
-# ── Hierarchy helpers (reused from graph_viz) ─────────────────────────────────
-_HIERARCHY_LEVELS = {
-    "UUD": 0, "TAP_MPR": 1, "TAPMPR": 1, "UU": 2, "PERPPU": 3, "PP": 4,
-    "PERPRES": 5, "PERMEN": 6, "PERMENDAG": 6, "PERMENKES": 6,
-    "PERMENPUPR": 6, "PERMENPPN": 6, "PERMENDAGRI": 6, "PERMENKEU": 6,
-    "PERMENLU": 6, "PERMENLHK": 6, "PERMENAKER": 6, "PERMENHUB": 6,
-    "PERMENRISTEKDIKTI": 6, "PERBAN": 7, "PERBANBPS": 7, "PERATURAN": 7,
-    "PERDA_PROV": 8, "PERGUB": 8, "PERDA_KAB": 9, "PERWAL": 9, "PERBUP": 9,
-    "PERKADA": 10, "KEP": 11, "KEPDIRJEN": 11, "KEPMEN": 11, "KEPPRES": 11,
-    "SK": 12, "SK_DIRJEN": 12, "SKDIRJENBK": 12, "INPRES": 13,
-    "INSTRUKSI": 13, "SE": 14,
+# ── Visual hierarchy: 11-level system matching Indonesia's regulation tiers ──
+# Each entry: (visual_level, display_name, prefixes[], color)
+VISUAL_LEVELS: list[tuple[int, str, list[str], str]] = [
+    (1,  "Undang-Undang Dasar",     ["UUD"],                                          "#0f172a"),
+    (2,  "Ketetapan MPR",           ["TAP_MPR", "TAPMPR"],                            "#1e3a5f"),
+    (3,  "UU / Perppu",             ["UU", "PERPPU"],                                 "#1d4ed8"),
+    (4,  "Peraturan Pemerintah",    ["PP"],                                           "#2563eb"),
+    (5,  "Peraturan Presiden",      ["PERPRES"],                                      "#0891b2"),
+    (6,  "Keputusan Presiden",      ["KEPPRES", "KEP"],                               "#0d9488"),
+    (7,  "Instruksi Presiden",      ["INPRES", "INSTRUKSI"],                          "#059669"),
+    (8,  "Peraturan Menteri",       [
+        "PERMEN", "PERMENDAG", "PERMENKES", "PERMENPUPR", "PERMENPPN",
+        "PERMENDAGRI", "PERMENKEU", "PERMENLU", "PERMENLHK", "PERMENAKER",
+        "PERMENHUB", "PERMENRISTEKDIKTI", "PERBAN", "PERBANBPS", "PERATURAN",
+        "KEPMEN", "KEPDIRJEN", "SE",
+    ],                                                                                "#7c3aed"),
+    (9,  "Peraturan Daerah",        ["PERDA_PROV", "PERDA_KAB"],                      "#c026d3"),
+    (10, "Peraturan Kepala Daerah", ["PERGUB", "PERBUP", "PERWAL", "PERKADA"],        "#e11d48"),
+    (11, "Regulasi Lainnya",        ["SK", "SK_DIRJEN", "SKDIRJENBK"],                "#6b7280"),
+]
+
+# Build fast lookup: prefix → (visual_level, color)
+_PREFIX_MAP: dict[str, tuple[int, str]] = {}
+for _vl, _name, _prefixes, _color in VISUAL_LEVELS:
+    for _pfx in _prefixes:
+        _PREFIX_MAP[_pfx] = (_vl, _color)
+
+# Level metadata
+_LEVEL_NAMES: dict[int, str] = {vl: name for vl, name, _, _ in VISUAL_LEVELS}
+_LEVEL_COLORS: dict[int, str] = {vl: color for vl, _, _, color in VISUAL_LEVELS}
+
+
+def _get_visual_level(doc_id: str) -> tuple[int, str]:
+    """Return (visual_level, color) for a doc_id."""
+    doc_upper = doc_id.upper()
+    # Special cases
+    if doc_upper.startswith("SK_DIRJEN") or doc_upper.startswith("SKDIRJEN"):
+        return _PREFIX_MAP.get("SK_DIRJEN", (11, "#6b7280"))
+    prefix = re.split(r"[-]", doc_upper)[0] if doc_upper else ""
+    if prefix in _PREFIX_MAP:
+        return _PREFIX_MAP[prefix]
+    # Fallback: try startswith
+    for pfx, val in _PREFIX_MAP.items():
+        if doc_upper.startswith(pfx):
+            return val
+    return (11, "#6b7280")
+
+
+def _extract_year(doc_id: str) -> str:
+    """Extract year from doc_id (typically last 4-digit segment)."""
+    parts = doc_id.split("-")
+    for p in reversed(parts):
+        if re.match(r"^\d{4}$", p):
+            return p
+    return ""
+
+
+_JENIS_DISPLAY = {
+    "UU": "UU", "PP": "PP", "PERPPU": "Perppu", "PERPRES": "Perpres",
+    "PERMEN": "Permen", "PERMENDAG": "Permen Dag", "PERMENKES": "Permen Kes",
+    "PERMENPUPR": "Permen PUPR", "PERMENPPN": "Permen PPN",
+    "PERMENDAGRI": "Permen Dagri", "PERMENKEU": "Permen Keu",
+    "PERGUB": "Pergub", "PERDA_KAB": "Perda Kab", "PERDA_PROV": "Perda Prov",
+    "KEPDIRJEN": "Kepdirjen", "KEPMEN": "Kepmen", "KEPPRES": "Keppres",
+    "PERWAL": "Perwal", "PERBUP": "Perbup", "SE": "SE", "INPRES": "Inpres",
 }
 
 
-def _get_hierarchy_level(doc_id: str) -> int:
-    doc_upper = doc_id.upper()
-    if doc_upper.startswith("SK_DIRJEN") or doc_upper.startswith("SKDIRJEN"):
-        return 12
-    prefix = re.split(r"[-]", doc_upper)[0] if doc_upper else ""
-    if prefix in _HIERARCHY_LEVELS:
-        return _HIERARCHY_LEVELS[prefix]
-    for known, level in _HIERARCHY_LEVELS.items():
-        if doc_upper.startswith(known):
-            return level
-    return 6
-
-
 def _short_label(doc_id: str) -> str:
-    """Abbreviated display label from a doc_id."""
+    """Abbreviated display label including year, e.g. 'UU 5/2014'."""
     parts = doc_id.split("-")
     if len(parts) < 3:
         return doc_id
     jenis_raw = parts[0]
-    _display = {
-        "UU": "UU", "PP": "PP", "PERPPU": "Perppu", "PERPRES": "Perpres",
-        "PERMEN": "Permen", "PERMENDAG": "Permen Dag", "PERMENKES": "Permen Kes",
-        "PERMENPUPR": "Permen PUPR", "PERMENPPN": "Permen PPN",
-        "PERMENDAGRI": "Permen Dagri", "PERMENKEU": "Permen Keu",
-        "PERGUB": "Pergub", "PERDA_KAB": "Perda Kab", "PERDA_PROV": "Perda Prov",
-        "KEPDIRJEN": "Kepdirjen", "KEPMEN": "Kepmen", "KEPPRES": "Keppres",
-        "PERWAL": "Perwal", "PERBUP": "Perbup", "SE": "SE", "INPRES": "Inpres",
-    }
-    jenis_display = _display.get(jenis_raw.upper(), jenis_raw.replace("_", " ").title())
+    jenis_display = _JENIS_DISPLAY.get(jenis_raw.upper(), jenis_raw.replace("_", " ").title())
     remaining = [p for p in parts[1:] if p.upper() not in ("NASIONAL", "PROVINSI", "KABUPATEN", "KOTA")]
-    if len(remaining) >= 2:
-        return f"{jenis_display} {remaining[0]}/{remaining[1]}"
-    elif remaining:
-        return f"{jenis_display} {remaining[0]}"
+    year = _extract_year(doc_id)
+    nomor_parts = [p for p in remaining if p != year]
+    if nomor_parts and year:
+        return f"{jenis_display} {nomor_parts[0]}/{year}"
+    elif nomor_parts:
+        return f"{jenis_display} {nomor_parts[0]}"
+    elif year:
+        return f"{jenis_display} /{year}"
     return jenis_display
+
+
+def get_level_legend(doc_ids: list[str]) -> list[dict]:
+    """Return legend entries only for hierarchy levels present in doc_ids.
+
+    Returns list of {level, name, color} sorted by level.
+    """
+    present: set[int] = set()
+    for did in doc_ids:
+        vl, _ = _get_visual_level(did)
+        present.add(vl)
+    legend = []
+    for vl in sorted(present):
+        legend.append({
+            "level": vl,
+            "name": _LEVEL_NAMES.get(vl, "Lainnya"),
+            "color": _LEVEL_COLORS.get(vl, "#6b7280"),
+        })
+    return legend
+
+
+def get_node_color(doc_id: str) -> str:
+    """Return the hierarchy color for a given doc_id."""
+    _, color = _get_visual_level(doc_id)
+    return color
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -141,21 +202,24 @@ def build_answer_graph(
     edges: list[Edge] = []
     seen_ids: set[str] = set()
 
-    # Nodes
+    # Nodes — color-coded by hierarchy level
     for doc_id in doc_ids:
         if doc_id in seen_ids:
             continue
         seen_ids.add(doc_id)
-        level = _get_hierarchy_level(doc_id)
+        vl, color = _get_visual_level(doc_id)
         label = _short_label(doc_id)
+        year = _extract_year(doc_id)
+        level_name = _LEVEL_NAMES.get(vl, "Lainnya")
+        tooltip = f"{doc_id}\n{level_name}" + (f" ({year})" if year else "")
         nodes.append(Node(
             id=doc_id,
             label=label,
             size=35,
-            color="#1e3a5f",
-            title=doc_id,
+            color=color,
+            title=tooltip,
             shape="box",
-            level=level,
+            level=vl,
             font={"color": "#ffffff", "size": 13, "face": "Inter, sans-serif", "bold": True},
             borderWidth=0,
             borderWidthSelected=3,
@@ -192,7 +256,7 @@ def build_answer_graph(
             color="#dc2626",
             width=4,
             dashes=False,
-            font={"color": "#dc2626", "size": 11, "face": "Inter, sans-serif", "bold": True},
+            font={"color": "#dc2626", "size": 10, "bold": True},
         ))
 
     return nodes, edges
