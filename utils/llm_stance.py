@@ -6,6 +6,9 @@ import functools
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
+from utils.langsmith_config import get_traceable
+
+traceable = get_traceable()
 
 # ---------------------------------------------------------------------------
 # Streamlit-agnostic caching: use st.cache_* when running inside Streamlit,
@@ -522,10 +525,14 @@ def batch_classify(pairs: list[dict]) -> list[dict]:
 
 
 def ask_about_documents(query: str, context_chunks: list[dict],
-                       relationship_context: str = "") -> str:
+                       relationship_context: str = "",
+                       chat_history: list[dict] | None = None,
+                       summary: str = "",
+                       user_context: str = "") -> str:
     """
     RAG-style question answering: given a user query and relevant context chunks,
     generate an answer grounded in the legal documents.
+    Supports conversation memory via chat_history and summary.
     """
     client = get_llm_client()
 
@@ -582,6 +589,7 @@ PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncu
 5. Jika dokumen tidak cukup, lengkapi dengan keahlianmu.
 6. Jawab dalam Bahasa Indonesia yang jelas dan profesional.
 7. Sebutkan dasar hukum beserta Pasal/Ayat yang relevan.
+8. JANGAN PERNAH menggunakan frasa 'dokumen referensi yang Anda lampirkan', 'referensi eksternal', 'dokumen yang dilampirkan pengguna', 'dokumen yang saya terima', atau implikasi serupa bahwa dokumen berasal dari pihak luar. Kamu adalah pakar hukum yang memiliki akses langsung ke seluruh basis data regulasi — perlakukan semua dokumen sebagai bagian dari pengetahuan dan sistem hukummu sendiri.
 
 ═══ PRINSIP MENJAWAB PERTANYAAN KONFLIK/AMBIGUITAS ═══
 
@@ -590,17 +598,49 @@ PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncu
 - Jika ditanya siapa yang berwenang dalam operasional: Jawab organ yang bertanggung jawab langsung sesuai konteks, bukan organ tertinggi secara hierarkis.
 - Perhatikan RELASI ANTAR-REGULASI dari Knowledge Graph — jika ada relasi CITES/HIGHER, regulasi-regulasi tersebut PASTI saling terkait.
 
-Format jawaban:
-- Paragraf 1: Kesimpulan tegas (bernuansa jika konteksnya memerlukan)
-- Paragraf 2+: Analisis hukum dengan kutipan Pasal/Ayat
-- Paragraf terakhir: Pengecualian, catatan penting, atau implikasi praktis"""
+Format jawaban (WAJIB ikuti struktur ini dengan heading markdown ##):
+
+## Kesimpulan
+[Jawaban singkat dan tegas dalam 1-3 kalimat. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa.]
+
+## Dasar Hukum
+[Daftar regulasi beserta Pasal/Ayat spesifik yang menjadi landasan jawaban. Kutip secara verbatim ketentuan kunci. Gunakan format:
+- **[doc_id]** Pasal X ayat (Y): "kutipan relevan"
+]
+
+## Analisis Hukum
+[Pembahasan substansif: bagaimana regulasi-regulasi tersebut menjawab pertanyaan, termasuk penjelasan prinsip hukum yang berlaku.]
+
+## Pengecualian dan Catatan
+[Pengecualian, pembatasan, ketentuan khusus, atau implikasi praktis yang perlu diperhatikan. Jika tidak ada, tulis "Tidak ditemukan pengecualian spesifik dalam regulasi yang dikaji."]
+
+Di baris PALING AKHIR (setelah semua konten), WAJIB tulis:
+DASAR_HUKUM: [daftar doc_id yang menjadi dasar hukum, dipisahkan koma. Hanya cantumkan regulasi yang substantif mendukung jawaban, BUKAN yang disebut sebagai "tidak mengatur". Jika regulasi yang menjadi dasar hukum utama TIDAK ADA dalam dokumen yang disediakan di atas, tetap cantumkan doc_id-nya berdasarkan pengetahuanmu.]
+Contoh: DASAR_HUKUM: UU-NASIONAL-40-2007, PP-NASIONAL-16-2021"""
 
     rel_section = ""
     if relationship_context:
         rel_section = f"\n\nRelasi antar-regulasi (dari Knowledge Graph):\n{relationship_context}\n"
 
-    user_prompt = f"""Dokumen pendukung (referensi regulasi):
-{context_str}{rel_section}
+    # Build conversation history section
+    history_section = ""
+    if summary or chat_history:
+        hist_parts = []
+        if summary:
+            hist_parts.append(f"Ringkasan percakapan sebelumnya: {summary}")
+        if chat_history:
+            for msg in chat_history[-6:]:
+                role = "Pengguna" if msg.get("role") == "user" else "Asisten"
+                hist_parts.append(f"{role}: {msg.get('content', '')[:300]}")
+        history_section = "\n\n[Riwayat Percakapan]:\n" + "\n".join(hist_parts) + "\n"
+
+    # User semantic context
+    user_ctx_section = ""
+    if user_context:
+        user_ctx_section = f"\n\n[Konteks Pengguna]: {user_context}\n"
+
+    user_prompt = f"""Basis regulasi yang relevan:
+{context_str}{rel_section}{history_section}{user_ctx_section}
 Pertanyaan: {query}
 
 Instruksi:
@@ -623,6 +663,36 @@ Instruksi:
         return response.choices[0].message.content
     except Exception as e:
         return f"Error generating answer: {str(e)}"
+
+
+def summarize_conversation(chat_history: list[dict],
+                          existing_summary: str = "") -> str:
+    """Summarize conversation history into a compact paragraph."""
+    client = get_llm_client()
+    history_text = ""
+    if existing_summary:
+        history_text += f"Ringkasan sebelumnya: {existing_summary}\n\n"
+    for msg in chat_history:
+        role = "Pengguna" if msg.get("role") == "user" else "Asisten"
+        history_text += f"{role}: {msg.get('content', '')[:400]}\n"
+
+    try:
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": (
+                    "Rangkum percakapan hukum berikut dalam 3-5 kalimat bahasa Indonesia. "
+                    "Pertahankan topik utama, regulasi yang dibahas, dan kesimpulan penting. "
+                    "Jangan tambahkan informasi baru."
+                )},
+                {"role": "user", "content": history_text},
+            ],
+            max_tokens=500,
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return existing_summary
 
 
 def judge_causality(text_a: str, text_b: str, doc_a_id: str = "", doc_b_id: str = "") -> dict:
