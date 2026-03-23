@@ -136,30 +136,43 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
 
 # ── LLM-powered query expansion ─────────────────────────────────────────────
 
-def expand_query(query: str) -> list[str]:
+def expand_query(query: str, *, _trace_id: str = "", _route: str = "") -> list[str]:
     """Use GPT to generate expanded search terms for an Indonesian legal query.
 
     Returns 3-5 alternative search phrases that capture the same legal concept
     using different terminology, specific UU/PP references, and synonyms.
     """
+    from shared.debug_logger import log_event as _dlog
     client = get_llm_client()
 
     system_prompt = """Kamu adalah pakar hukum Indonesia. Tugasmu adalah menghasilkan variasi query pencarian untuk menemukan dokumen regulasi yang relevan di database vektor.
 
 Untuk setiap pertanyaan hukum yang diberikan, hasilkan 3-5 variasi pencarian yang:
-1. Menggunakan istilah hukum formal yang berbeda (sinonim hukum)
+1. Menggunakan istilah hukum formal yang berbeda (sinonim hukum). Untuk pertanyaan definisi/pengertian, WAJIB sertakan frasa "yang dimaksud dengan [istilah]" karena ini adalah pola umum dalam pasal ketentuan umum regulasi Indonesia.
 2. Menyebutkan UU/PP/Permen spesifik yang kemungkinan mengatur topik tersebut
-3. Menggunakan frasa kunci dari pasal yang relevan
+3. Menggunakan frasa kunci dari pasal yang relevan (misalnya "ketentuan umum", "definisi", "pengertian")
 4. Mencakup istilah teknis yang mungkin muncul di dokumen regulasi
 
+Contoh: jika pertanyaan "apa itu bangunan gedung?", hasilkan:
+- yang dimaksud dengan bangunan gedung
+- definisi bangunan gedung UU 28/2002
+- pengertian bangunan gedung PP 16/2021
+- ketentuan umum bangunan gedung
+
 Format output: Satu variasi per baris, tanpa nomor atau bullet."""
+
+    user_prompt = f"Pertanyaan: {query}"
+    if _trace_id:
+        _dlog(trace_id=_trace_id, route=_route, stage="expand_query", event="prompt_input",
+              message="expand_query prompt input",
+              payload={"system_prompt": system_prompt, "user_prompt": user_prompt})
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Pertanyaan: {query}"},
+                {"role": "user", "content": user_prompt},
             ],
             max_tokens=250,
             temperature=0.4,
@@ -167,7 +180,12 @@ Format output: Satu variasi per baris, tanpa nomor atau bullet."""
         raw = response.choices[0].message.content or ""
         # Parse lines, skip empty
         lines = [ln.strip().lstrip("0123456789.-) ") for ln in raw.strip().splitlines()]
-        return [ln for ln in lines if len(ln) > 5][:5]
+        result = [ln for ln in lines if len(ln) > 5][:5]
+        if _trace_id:
+            _dlog(trace_id=_trace_id, route=_route, stage="expand_query", event="prompt_output",
+                  message="expand_query prompt output",
+                  payload={"raw_response": raw, "expanded_queries": result})
+        return result
     except Exception:
         return []  # Graceful fallback — proceed with original query only
 
@@ -244,7 +262,7 @@ Output HANYA doc_id, tanpa penjelasan."""
 
 # ── LLM-powered document re-ranking ─────────────────────────────────────────
 
-def rerank_documents(query: str, doc_summaries: dict[str, str]) -> list[tuple[str, float]]:
+def rerank_documents(query: str, doc_summaries: dict[str, str], *, _trace_id: str = "", _route: str = "") -> list[tuple[str, float]]:
     """Re-rank candidate documents by relevance using GPT.
 
     Parameters
@@ -259,6 +277,7 @@ def rerank_documents(query: str, doc_summaries: dict[str, str]) -> list[tuple[st
     list[tuple[str, float]]
         Sorted list of (doc_id, score) with score 0-10, descending.
     """
+    from shared.debug_logger import log_event as _dlog
     if not doc_summaries:
         return []
 
@@ -284,12 +303,18 @@ Skor:
 
 Output HANYA JSON array, tanpa teks lain."""
 
+    user_prompt = f"Pertanyaan: {query}\n\nDokumen:\n{summaries_str}"
+    if _trace_id:
+        _dlog(trace_id=_trace_id, route=_route, stage="rerank_documents", event="prompt_input",
+              message="rerank_documents prompt input",
+              payload={"system_prompt": system_prompt, "user_prompt": user_prompt})
+
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Pertanyaan: {query}\n\nDokumen:\n{summaries_str}"},
+                {"role": "user", "content": user_prompt},
             ],
             max_tokens=300,
             temperature=0.1,
