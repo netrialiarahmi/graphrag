@@ -8,6 +8,7 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
+from utils.conflict_logger import is_conflict_related_question
 
 class GraphState(TypedDict):
     query: str
@@ -103,7 +104,8 @@ def router_node(state: GraphState) -> GraphState:
     logs.append("[Router Node] Started analysis")
     
     regex_ids = _extract_doc_ids_from_question(query)
-    if regex_ids:
+    conflict_intent = is_conflict_related_question(query)
+    if regex_ids and (not conflict_intent or len(regex_ids) >= 2):
         state["route"] = "direct"
         state["primary_doc_ids"] = list(regex_ids)
         logs.append(f"[Router Node] Regex hit: {list(regex_ids)[0]}")
@@ -111,6 +113,8 @@ def router_node(state: GraphState) -> GraphState:
         state["logs"] = logs
         state["narratives"] = narratives
         return state
+    elif regex_ids and conflict_intent:
+        logs.append("[Router Node] Conflict intent detected; skipping direct route to gather comparison documents.")
 
     system_prompt = """You are a Legal AI Planner indexing Indonesian law.
 Analyze the user's query and return a strict JSON object with EXACTLY two keys:

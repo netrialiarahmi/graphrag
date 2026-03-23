@@ -17,6 +17,14 @@ CONFLICT_CSV_COLUMNS = [
 ]
 
 
+def clear_conflict_output_csv() -> None:
+    """Reset conflict CSV to header-only for a new question/session run."""
+    os.makedirs(CONFLICT_OUTPUT_DIR, exist_ok=True)
+    with open(CONFLICT_OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
+        writer.writeheader()
+
+
 def is_conflict_related_question(query: str) -> bool:
     """Heuristic to decide whether a user query asks about legal conflict/ambiguity."""
     q = (query or "").lower()
@@ -163,17 +171,23 @@ def append_conflict_rows(
     os.makedirs(CONFLICT_OUTPUT_DIR, exist_ok=True)
     relation_type = _normalize_relation_type(conflict_result)
 
-    # Reset file for each new write so relations from previous chats do not leak.
+    # Overwrite with current run rows.
     with open(CONFLICT_OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
         writer.writeheader()
+        seen_out: set[tuple[str, str, str]] = set()
         for edge in rows:
+            out_row = {
+                "doc_1": edge["doc1"],
+                "doc_2": edge["doc2"],
+                "relation_type": relation_type,
+            }
+            out_key = (out_row["doc_1"], out_row["doc_2"], out_row["relation_type"])
+            if out_key in seen_out:
+                continue
+            seen_out.add(out_key)
             writer.writerow(
-                {
-                    "doc_1": edge["doc1"],
-                    "doc_2": edge["doc2"],
-                    "relation_type": relation_type,
-                }
+                out_row
             )
 
-    return len(rows)
+    return len(seen_out)

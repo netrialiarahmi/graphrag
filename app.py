@@ -24,8 +24,9 @@ load_dotenv()  # local .env still wins for local dev (already set → setdefault
 
 import os, re, glob, pandas as pd
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
-from utils.conflict_logger import is_conflict_related_question, append_conflict_rows
+from utils.conflict_logger import is_conflict_related_question, append_conflict_rows, clear_conflict_output_csv
 from utils.timeline_html import build_timeline_html
+from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
@@ -890,6 +891,9 @@ with tab_search:
             full_ans = st.write_stream(gen)
             full_ans_text = "".join(full_ans) if isinstance(full_ans, list) else str(full_ans or "")
 
+            # New question lifecycle: clear previous relation logs first.
+            clear_conflict_output_csv()
+
             # Always write relation rows so visualization is available for every question.
             # Guardrail: only conflict-intent questions may be labeled as conflict.
             # For non-conflict questions, force NO_CONFLICT to avoid false positives
@@ -905,7 +909,29 @@ with tab_search:
                 }
             _primary_ids = final_state.get("primary_doc_ids", []) or []
             _context_ids = list((final_state.get("context_docs", {}) or {}).keys())
-            _all_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids)]))
+            _chunk_ids = []
+            for _ch in final_state.get("final_chunks", []) or []:
+                _did = (_ch or {}).get("doc_id", "")
+                if _did:
+                    _chunk_ids.append(_did)
+            _query_ids = list(_extract_doc_ids_from_question(query or ""))
+            _answer_ids = list(_extract_doc_ids_from_question(full_ans_text or ""))
+
+            _all_ids = list(
+                dict.fromkeys([
+                    *(_primary_ids),
+                    *(_context_ids),
+                    *(_chunk_ids),
+                    *(_query_ids),
+                    *(_answer_ids),
+                ])
+            )
+
+            # Last-resort fallback: if parser found at least two IDs in text only.
+            if len(_all_ids) < 2:
+                _fallback_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
+                if len(_fallback_ids) >= 2:
+                    _all_ids = _fallback_ids
             _saved = append_conflict_rows(
                 conflict_result=conflict_result,
                 primary_doc_ids=_all_ids,
@@ -913,6 +939,8 @@ with tab_search:
             )
             if _saved:
                 st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
+            else:
+                st.caption("Tidak ada pasangan regulasi yang bisa disimpan untuk visualisasi dari hasil pertanyaan ini.")
             
             st.session_state.search_answer = full_ans_text
             # If the agent produced a CSV of relations, render the timeline visualization
