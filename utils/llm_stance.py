@@ -321,16 +321,23 @@ def rerank_documents(query: str, doc_summaries: dict[str, str], trace_id: str | 
 
     system_prompt = """Kamu adalah pakar hukum Indonesia. Berikan skor relevansi 0-10 untuk setiap dokumen terhadap pertanyaan yang diberikan.
 
+PENTING:
+Pertimbangkan NIAT (intent) pertanyaan pengguna:
+- Jika bertanya definisi (apa itu X), prioritaskan dokumen yang memuat rumusan pasal 1 atau ketentuan umum.
+- Jika bertanya sanksi, prioritaskan dokumen yang menyebut denda, pidana, atau larangan.
+- Jika bertanya prosedur, prioritaskan yang menyebutkan tata cara, syarat, perizinan, atau instansi berwenang.
+Jangan memberi skor tinggi hanya karena ada kata kunci (keyword matching) jika konteks kalimatnya melenceng jauh.
+
 Format output HARUS berupa JSON array, contoh:
 [{"doc_id": "UU-NASIONAL-40-2007", "score": 9}, {"doc_id": "PP-NASIONAL-16-2021", "score": 1}]
 
 Skor:
-- 8-10: Sangat relevan, kemungkinan besar memuat jawaban
-- 5-7: Cukup relevan, mungkin memuat konteks pendukung
-- 2-4: Sedikit relevan, hubungan tidak langsung
-- 0-1: Tidak relevan sama sekali
+- 8-10: Sangat relevan, langsung menjawab inti pertanyaan (intent matched)
+- 5-7: Cukup relevan, memuat konteks pelengkap yang bisa dikembangkan
+- 2-4: Sedikit relevan, hanya lewat sekilas atau topik berdekatan
+- 0-1: Tidak relevan sama sekali atau konten kosong
 
-Output HANYA JSON array, tanpa teks lain."""
+Output HANYA JSON array, tanpa teks tambahan apapun."""
 
     start = time.perf_counter()
     try:

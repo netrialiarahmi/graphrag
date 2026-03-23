@@ -24,6 +24,7 @@ class GraphState(TypedDict):
     answer: str
     logs: List[str]
     narratives: List[str] # User-facing legal explanations
+    final_chunks: List[dict]
 
 def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, max_chunks=30, max_chars=12000):
     result = []
@@ -72,9 +73,13 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
         for ch in raw_vdb_hits:
             did = ch.get("doc_id", "")
             if did in doc_ids:
+                content = ch.get("content", "").strip()
+                if not content or content.lower() in ["cukup jelas.", "cukup jelas", "(kosong)", "-"]:
+                    continue
                 context_docs.setdefault(did, {"source": "VDB", "chunks": []})
                 cid = ch.get("id")
                 if cid and cid not in seen_chunk_ids:
+                    ch["source"] = "VDB"
                     context_docs[did]["chunks"].append(ch)
                     seen_chunk_ids.add(cid)
     if neo4j_client.test_connection():
@@ -84,10 +89,13 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                 context_docs.setdefault(did, {"source": "Graph", "chunks": []})
                 for p in detail.get("pasals", []) + detail.get("ayats", []):
                     content = p.get("content", "")
-                    pid = str(p.get("name", ""))
-                    nid = f"neo-{did}-{pid}"
+                    # P0 Fix: Chunk ID collision. Use both name and hash of content for strict uniqueness
+                    pid = str(p.get("name", p.get("id", "")))
+                    import hashlib
+                    chash = hashlib.md5(content.encode('utf-8', errors='ignore')).hexdigest()[:8]
+                    nid = f"neo-{did}-{pid}-{chash}"
                     if content and len(content) > 20 and nid not in seen_chunk_ids:
-                        context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal"})
+                        context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal", "source": "Graph"})
                         seen_chunk_ids.add(nid)
             except Exception: pass
     rel_context = state.get("relationship_context", "")
@@ -124,13 +132,13 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
     if get_logging_config().get("verbose", False):
         retrieval_items: list[dict[str, Any]] = []
         for did, info in context_docs.items():
-            src = (info or {}).get("source", "-")
+            fallback_src = (info or {}).get("source", "-")
             for ch in (info or {}).get("chunks", []) or []:
                 retrieval_items.append(
                     {
                         "doc_id": did,
                         "chunk_id": ch.get("id", ""),
-                        "source": src,
+                        "source": ch.get("source", fallback_src),
                         "retrieval_method": ch.get("scope", "unknown"),
                         "content": ch.get("content", ""),
                         "score": ch.get("score"),
@@ -597,6 +605,7 @@ def generate_answer_node(state: GraphState) -> GraphState:
                     {
                         "doc_id": c.get("doc_id", ""),
                         "scope": c.get("scope", ""),
+                        "source": c.get("source", ""),
                         "chunk_id": c.get("id", ""),
                         "content": c.get("content", ""),
                         "score": c.get("score"),
