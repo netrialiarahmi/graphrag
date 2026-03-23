@@ -723,6 +723,95 @@ Format jawaban:
         yield f"Error saat menyusun jawaban: {str(e)}"
 
 
+def detect_conflict_inference(query: str, answer: str) -> dict:
+    """
+    Decide whether the final answer indicates potential legal conflict.
+
+    Returns:
+        {
+            "is_conflict": bool,
+            "label": "CONFLICT" | "NO_CONFLICT",
+            "reason": str,
+            "confidence": float
+        }
+    """
+    client = get_llm_client()
+
+    system_prompt = """Kamu adalah evaluator keluaran QA hukum.
+Tentukan apakah jawaban model menyimpulkan ADA konflik/pertentangan/potensi konflik/ambiguitas normatif antar regulasi.
+
+Aturan:
+- Nilai CONFLICT jika jawaban menyatakan ada konflik langsung, potensi konflik, disharmoni, tumpang tindih kewenangan, ketegangan lex specialis, atau ambiguitas transisional yang berdampak konflik normatif.
+- Nilai NO_CONFLICT jika jawaban menyatakan harmonis, tidak bertentangan, atau tidak ada potensi konflik.
+- Fokus pada KESIMPULAN jawaban, bukan hanya kata kunci tunggal.
+
+Kembalikan JSON valid SAJA dengan format:
+{"is_conflict": true/false, "label": "CONFLICT|NO_CONFLICT", "reason": "ringkas 1 kalimat", "confidence": 0.0-1.0}
+"""
+
+    user_prompt = f"Pertanyaan:\n{query}\n\nJawaban Model:\n{answer}"
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=180,
+            temperature=0.0,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw)
+
+        is_conflict = bool(data.get("is_conflict", False))
+        label = str(data.get("label", "NO_CONFLICT")).upper()
+        if label not in {"CONFLICT", "NO_CONFLICT"}:
+            label = "CONFLICT" if is_conflict else "NO_CONFLICT"
+        reason = str(data.get("reason", ""))
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        return {
+            "is_conflict": is_conflict,
+            "label": label,
+            "reason": reason,
+            "confidence": confidence,
+        }
+    except Exception:
+        # Conservative heuristic fallback from answer text only.
+        text = (answer or "").lower()
+        positive_markers = [
+            "potensi konflik",
+            "terdapat konflik",
+            "ada konflik",
+            "bertentangan",
+            "disharmoni",
+            "tumpang tindih",
+            "ambiguitas",
+        ]
+        negative_markers = [
+            "tidak ada konflik",
+            "tidak bertentangan",
+            "harmonis",
+            "saling menguatkan",
+            "komplementer",
+        ]
+        has_positive = any(m in text for m in positive_markers)
+        has_negative = any(m in text for m in negative_markers)
+        is_conflict = has_positive and not has_negative
+        return {
+            "is_conflict": is_conflict,
+            "label": "CONFLICT" if is_conflict else "NO_CONFLICT",
+            "reason": "fallback-heuristic",
+            "confidence": 0.55 if is_conflict else 0.5,
+        }
+
+
 def judge_causality(text_a: str, text_b: str, doc_a_id: str = "", doc_b_id: str = "") -> dict:
     """
     Judge whether two related legal documents contradict or align.

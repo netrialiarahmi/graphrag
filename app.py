@@ -24,6 +24,7 @@ load_dotenv()  # local .env still wins for local dev (already set → setdefault
 
 import os, re, glob
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
+from utils.conflict_logger import is_conflict_related_question, append_conflict_rows
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
@@ -811,6 +812,69 @@ with tab_search:
                 st.session_state.search_doc_ids = final_state.get("primary_doc_ids", [])
                 st.session_state.search_context_docs = final_state.get("context_docs", {})
                 st.session_state.search_edges = {"edges": []}
+
+                # Add explicit doc-id retrieval trace for full debug visibility.
+                primary_ids = final_state.get("primary_doc_ids", []) or []
+                context_ids = list((final_state.get("context_docs", {}) or {}).keys())
+                chunk_ids: list[str] = []
+                for _ch in final_state.get("final_chunks", []) or []:
+                    _did = _ch.get("doc_id", "")
+                    if _did and _did not in chunk_ids:
+                        chunk_ids.append(_did)
+
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Retrieved doc_ids (primary): " + (", ".join(primary_ids) if primary_ids else "-")
+                )
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Retrieved doc_ids (context_docs): " + (", ".join(context_ids) if context_ids else "-")
+                )
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Retrieved doc_ids (final_chunks): " + (", ".join(chunk_ids) if chunk_ids else "-")
+                )
+
+                # Deep retrieval diagnostics: show chunk inventory and full injected prompt.
+                chunks = final_state.get("final_chunks", []) or []
+                rel_context = final_state.get("relationship_context", "")
+                context_docs = final_state.get("context_docs", {}) or {}
+
+                chunk_count_lines = []
+                for _did, _info in context_docs.items():
+                    _count = len((_info or {}).get("chunks", []) or [])
+                    _src = (_info or {}).get("source", "-")
+                    chunk_count_lines.append(f"- {_did}: chunks={_count}, source={_src}")
+                final_state.setdefault("logs", []).append(
+                    "[Debug] context_docs chunk inventory:\n" + ("\n".join(chunk_count_lines) if chunk_count_lines else "-")
+                )
+
+                if not chunks:
+                    final_state.setdefault("logs", []).append(
+                        "[Debug] final_chunks is EMPTY. Possible causes: selected doc_ids exist but have no retrieved chunks, or all chunks filtered/deduplicated by interleaving rules."
+                    )
+
+                full_context_parts = []
+                for i, chunk in enumerate(chunks, 1):
+                    _doc_id = chunk.get("doc_id", "Unknown")
+                    _scope = chunk.get("scope", "")
+                    _content = chunk.get("content", "")
+                    full_context_parts.append(f"[{i}] {_doc_id} ({_scope}):\n{_content}")
+
+                full_context_str = "\n\n".join(full_context_parts)
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Full retrieval context (NO CUT):\n" + (full_context_str if full_context_str else "-")
+                )
+
+                injected_user_prompt = (
+                    "Pertanyaan Pengguna:\n"
+                    f"{query}\n\n"
+                    "Konteks Dokumen yang Ditemukan:\n"
+                    f"{full_context_str}"
+                )
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Injected user prompt (NO CUT):\n" + injected_user_prompt
+                )
+                final_state.setdefault("logs", []).append(
+                    "[Debug] Relationship context injected (NO CUT):\n" + (rel_context if rel_context else "-")
+                )
             
             with st.expander("⚙️ System Debug Logs"):
                 for log in final_state.get("logs", []):
@@ -823,8 +887,19 @@ with tab_search:
             # LIVE STREAMING THE ANSWER
             gen = ask_about_documents_stream(query, chunks, rel_context)
             full_ans = st.write_stream(gen)
+            full_ans_text = "".join(full_ans) if isinstance(full_ans, list) else str(full_ans or "")
+
+            if is_conflict_related_question(query):
+                conflict_result = llm_stance.detect_conflict_inference(query, full_ans_text)
+                _saved = append_conflict_rows(
+                    conflict_result=conflict_result,
+                    primary_doc_ids=final_state.get("primary_doc_ids", []),
+                    relationship_context=rel_context,
+                )
+                if _saved:
+                    st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
             
-            st.session_state.search_answer = full_ans
+            st.session_state.search_answer = full_ans_text
 
         except Exception as e:
             st.error(f"Error: {e}")
