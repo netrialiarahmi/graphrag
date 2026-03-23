@@ -83,9 +83,15 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                     context_docs[did]["chunks"].append(ch)
                     seen_chunk_ids.add(cid)
     if neo4j_client.test_connection():
+        # Keep track of valid docs to filter out completely non-existent aliased/hallucinated IDs
+        valid_doc_ids = []
         for did in doc_ids:
             try:
                 detail = neo4j_client.get_document_detail(did)
+                if not detail:
+                    continue  # The document does not exist in Neo4j
+                valid_doc_ids.append(did)
+                
                 context_docs.setdefault(did, {"source": "Graph", "chunks": []})
                 for p in detail.get("pasals", []) + detail.get("ayats", []):
                     content = p.get("content", "")
@@ -98,6 +104,10 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                         context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal", "source": "Graph"})
                         seen_chunk_ids.add(nid)
             except Exception: pass
+            
+        # Update primary_doc_ids to only include the ones that actually exist.
+        # Fail-closed: if none are valid, keep an empty list (do not retain aliases).
+        state["primary_doc_ids"] = valid_doc_ids
     rel_context = state.get("relationship_context", "")
     if neo4j_client.test_connection():
         try:
@@ -165,6 +175,17 @@ def router_node(state: GraphState) -> GraphState:
     logs.append("[Router Node] Started analysis")
     
     regex_ids = _extract_doc_ids_from_question(query)
+    
+    if regex_ids and neo4j_client.test_connection():
+        # Validate early so we don't route to fake aliases
+        valid_regex_ids = set()
+        for did in regex_ids:
+            try:
+                if neo4j_client.get_document_detail(did):
+                    valid_regex_ids.add(did)
+            except Exception: pass
+        regex_ids = valid_regex_ids
+
     conflict_intent = is_conflict_related_question(query)
     if regex_ids and (not conflict_intent or len(regex_ids) >= 2):
         state["route"] = "direct"
@@ -281,8 +302,18 @@ def direct_lookup_node(state: GraphState) -> GraphState:
         all_docs = neo4j_client.get_all_documents()
         doc_ids = llm_stance.smart_doc_lookup(query, all_docs)[:3]
         
+    if doc_ids and neo4j_client.test_connection():
+        # Validate that the extracted doc_ids actually exist in the database
+        valid_doc_ids = []
+        for did in doc_ids:
+            try:
+                if neo4j_client.get_document_detail(did):
+                    valid_doc_ids.append(did)
+            except Exception: pass
+        doc_ids = valid_doc_ids
+        
     if not doc_ids:
-        state["logs"].append("[Direct Node] No docs found, fallback -> semantic")
+        state["logs"].append("[Direct Node] No valid docs found, fallback -> semantic")
         state["route"] = "semantic"
         log_event(
             "graphrag.app",

@@ -892,7 +892,34 @@ with tab_search:
                     _chunk_ids.append(_did)
             _query_ids = list(_extract_doc_ids_from_question(query or ""))
             _answer_ids = list(_extract_doc_ids_from_question(full_ans_text or ""))
-            _text_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
+            _text_ids_raw = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
+
+            # Guardrail: text-regex extraction can produce alias IDs that do not exist in Neo4j.
+            # Only keep text IDs that are actually present in Neo4j.
+            _text_ids = []
+            _dropped_text_ids = []
+            if neo4j_client.test_connection():
+                for _did in _text_ids_raw:
+                    try:
+                        if neo4j_client.get_document_detail(_did):
+                            _text_ids.append(_did)
+                        else:
+                            _dropped_text_ids.append(_did)
+                    except Exception:
+                        _dropped_text_ids.append(_did)
+            else:
+                _dropped_text_ids = _text_ids_raw
+
+            if _dropped_text_ids:
+                log_event(
+                    "graphrag.app",
+                    "Dropped non-existent text-extracted doc_ids",
+                    trace_id=trace_id,
+                    route=final_state.get("route", "unknown"),
+                    stage="relation_pairing",
+                    event="doc_id_validation",
+                    payload={"dropped_doc_ids": _dropped_text_ids},
+                )
             _all_ids = list(
                 dict.fromkeys([
                     *(_primary_ids),
@@ -902,13 +929,16 @@ with tab_search:
                 ])
             )
 
-            # Prefer IDs grounded in the question/answer text; fallback to all retrieved IDs.
-            if len(_text_ids) >= 2:
+            # Prefer IDs grounded by retrieval (primary/context/chunks), then append validated text IDs.
+            _grounded_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids), *(_chunk_ids)]))
+            if len(_grounded_ids) >= 2:
+                _paired_ids = _grounded_ids
+            elif len(_text_ids) >= 2:
                 _paired_ids = _text_ids
             elif len(_all_ids) >= 2:
                 _paired_ids = _all_ids
             else:
-                _paired_ids = _text_ids or _all_ids
+                _paired_ids = _grounded_ids or _text_ids or _all_ids
             _saved = append_conflict_rows(
                 conflict_result=conflict_result,
                 primary_doc_ids=_paired_ids,
