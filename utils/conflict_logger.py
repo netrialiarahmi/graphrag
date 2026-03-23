@@ -155,7 +155,7 @@ def append_conflict_rows(
     primary_doc_ids: list[str],
     relationship_context: str,
 ) -> int:
-    """Append inferred conflict relations to CSV. Returns number of rows written."""
+    """Write inferred conflict relations to CSV (overwrite old logs)."""
     rows = _collect_edges_for_conflict_log(primary_doc_ids, relationship_context)
     if not rows:
         return 0
@@ -163,21 +163,10 @@ def append_conflict_rows(
     os.makedirs(CONFLICT_OUTPUT_DIR, exist_ok=True)
     relation_type = _normalize_relation_type(conflict_result)
 
-    rewrite_schema = True
-    if os.path.isfile(CONFLICT_OUTPUT_CSV):
-        try:
-            with open(CONFLICT_OUTPUT_CSV, "r", newline="", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                header = next(reader, [])
-            rewrite_schema = header != CONFLICT_CSV_COLUMNS
-        except Exception:
-            rewrite_schema = True
-
-    if rewrite_schema:
-        _ensure_compact_csv_schema(CONFLICT_OUTPUT_CSV)
-
-    with open(CONFLICT_OUTPUT_CSV, "a", newline="", encoding="utf-8-sig") as f:
+    # Reset file for each new write so relations from previous chats do not leak.
+    with open(CONFLICT_OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
+        writer.writeheader()
         for edge in rows:
             writer.writerow(
                 {

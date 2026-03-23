@@ -22,9 +22,10 @@ from dotenv import load_dotenv
 
 load_dotenv()  # local .env still wins for local dev (already set → setdefault is no-op)
 
-import os, re, glob
+import os, re, glob, pandas as pd
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.conflict_logger import is_conflict_related_question, append_conflict_rows
+from utils.timeline_html import build_timeline_html
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
@@ -889,17 +890,38 @@ with tab_search:
             full_ans = st.write_stream(gen)
             full_ans_text = "".join(full_ans) if isinstance(full_ans, list) else str(full_ans or "")
 
+            # Always write relation rows so visualization is available for every question.
+            # Guardrail: only conflict-intent questions may be labeled as conflict.
+            # For non-conflict questions, force NO_CONFLICT to avoid false positives
+            # from generic legal wording inside long-form answers.
             if is_conflict_related_question(query):
                 conflict_result = llm_stance.detect_conflict_inference(query, full_ans_text)
-                _saved = append_conflict_rows(
-                    conflict_result=conflict_result,
-                    primary_doc_ids=final_state.get("primary_doc_ids", []),
-                    relationship_context=rel_context,
-                )
-                if _saved:
-                    st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
+            else:
+                conflict_result = {
+                    "is_conflict": False,
+                    "label": "NO_CONFLICT",
+                    "reason": "non_conflict_query_guardrail",
+                    "confidence": 1.0,
+                }
+            _primary_ids = final_state.get("primary_doc_ids", []) or []
+            _context_ids = list((final_state.get("context_docs", {}) or {}).keys())
+            _all_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids)]))
+            _saved = append_conflict_rows(
+                conflict_result=conflict_result,
+                primary_doc_ids=_all_ids,
+                relationship_context=rel_context,
+            )
+            if _saved:
+                st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
             
             st.session_state.search_answer = full_ans_text
+            # If the agent produced a CSV of relations, render the timeline visualization
+            _out_csv = os.path.join(os.path.dirname(__file__), "output", "conflict", "potential_conflict_relations.csv")
+            if os.path.isfile(_out_csv):
+                _html = build_timeline_html(_out_csv)
+                if _html:
+                    section_divider("Relasi Dokumen — Visualisasi")
+                    st.markdown(_html, unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"Error: {e}")
