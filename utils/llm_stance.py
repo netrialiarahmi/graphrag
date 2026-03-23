@@ -3,9 +3,13 @@
 import os
 import json
 import functools
+import time
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
+from utils.logging_config import setup_logging, log_event, get_logging_config
+
+setup_logging()
 
 # ---------------------------------------------------------------------------
 # Streamlit-agnostic caching: use st.cache_* when running inside Streamlit,
@@ -133,7 +137,7 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
 
 # ── LLM-powered query expansion ─────────────────────────────────────────────
 
-def expand_query(query: str) -> list[str]:
+def expand_query(query: str, trace_id: str | None = None) -> list[str]:
     """Use GPT to generate expanded search terms for an Indonesian legal query.
 
     Returns 3-5 alternative search phrases that capture the same legal concept
@@ -151,7 +155,22 @@ Untuk setiap pertanyaan hukum yang diberikan, hasilkan 3-5 variasi pencarian yan
 
 Format output: Satu variasi per baris, tanpa nomor atau bullet."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "expand_query prompt input",
+                trace_id=trace_id,
+                route="deep",
+                stage="expand_query",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": f"Pertanyaan: {query}",
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -164,8 +183,40 @@ Format output: Satu variasi per baris, tanpa nomor atau bullet."""
         raw = response.choices[0].message.content or ""
         # Parse lines, skip empty
         lines = [ln.strip().lstrip("0123456789.-) ") for ln in raw.strip().splitlines()]
-        return [ln for ln in lines if len(ln) > 5][:5]
+        expanded = [ln for ln in lines if len(ln) > 5][:5]
+        log_event(
+            "graphrag.app",
+            "expand_query completed",
+            trace_id=trace_id,
+            route="deep",
+            stage="expand_query",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"expanded_count": len(expanded)},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "expand_query prompt output",
+                trace_id=trace_id,
+                route="deep",
+                stage="expand_query",
+                event="prompt_output",
+                payload={"raw_response": raw, "expanded_queries": expanded},
+                trim_payload=False,
+            )
+        return expanded
     except Exception:
+        log_event(
+            "graphrag.error",
+            "expand_query failed",
+            trace_id=trace_id,
+            route="deep",
+            stage="expand_query",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            level=40,
+        )
         return []  # Graceful fallback — proceed with original query only
 
 
@@ -241,7 +292,7 @@ Output HANYA doc_id, tanpa penjelasan."""
 
 # ── LLM-powered document re-ranking ─────────────────────────────────────────
 
-def rerank_documents(query: str, doc_summaries: dict[str, str]) -> list[tuple[str, float]]:
+def rerank_documents(query: str, doc_summaries: dict[str, str], trace_id: str | None = None) -> list[tuple[str, float]]:
     """Re-rank candidate documents by relevance using GPT.
 
     Parameters
@@ -281,7 +332,22 @@ Skor:
 
 Output HANYA JSON array, tanpa teks lain."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "rerank_documents prompt input",
+                trace_id=trace_id,
+                route="deep",
+                stage="rerank_documents",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": f"Pertanyaan: {query}\n\nDokumen:\n{summaries_str}",
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -304,8 +370,39 @@ Output HANYA JSON array, tanpa teks lain."""
             if did:
                 results.append((did, score))
         results.sort(key=lambda x: x[1], reverse=True)
+        log_event(
+            "graphrag.app",
+            "rerank_documents completed",
+            trace_id=trace_id,
+            route="deep",
+            stage="rerank_documents",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_count": len(results)},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "rerank_documents prompt output",
+                trace_id=trace_id,
+                route="deep",
+                stage="rerank_documents",
+                event="prompt_output",
+                payload={"raw_response": raw, "ranked": results},
+                trim_payload=False,
+            )
         return results
     except Exception:
+        log_event(
+            "graphrag.error",
+            "rerank_documents failed",
+            trace_id=trace_id,
+            route="deep",
+            stage="rerank_documents",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            level=40,
+        )
         # Fallback: return all docs with neutral score
         return [(did, 5.0) for did in doc_summaries]
 
@@ -625,8 +722,13 @@ Instruksi:
         return "Error saat menyusun jawaban: " + str(e)
 
 
-def ask_about_documents_stream(query: str, context_chunks: list[dict],
-                       relationship_context: str = ""):
+def ask_about_documents_stream(
+    query: str,
+    context_chunks: list[dict],
+    relationship_context: str = "",
+    trace_id: str | None = None,
+    route: str = "unknown",
+):
     """
     Streaming version of ask_about_documents.
     Yields chunks of text as they are generated by the LLM.
@@ -704,6 +806,23 @@ Format jawaban:
 
     user_prompt = f"Pertanyaan Pengguna:\n{query}\n\nKonteks Dokumen yang Ditemukan:\n{context_str}"
 
+    start = time.perf_counter()
+    if get_logging_config().get("verbose", False):
+        log_event(
+            "graphrag.debug",
+            "final_answer prompt input",
+            trace_id=trace_id,
+            route=route,
+            stage="final_answer",
+            event="prompt_input",
+            payload={
+                "system_prompt": system_prompt + rel_section,
+                "user_prompt": user_prompt,
+            },
+            trim_payload=False,
+        )
+
+    output_parts: list[str] = []
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
@@ -717,9 +836,49 @@ Format jawaban:
         )
         for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+                piece = chunk.choices[0].delta.content
+                output_parts.append(piece)
+                yield piece
+
+        full_output = "".join(output_parts)
+        log_event(
+            "graphrag.app",
+            "final_answer completed",
+            trace_id=trace_id,
+            route=route,
+            stage="final_answer",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={
+                "output_length": len(full_output),
+                "context_chunk_count": len(context_chunks),
+            },
+        )
+
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "final_answer prompt output",
+                trace_id=trace_id,
+                route=route,
+                stage="final_answer",
+                event="prompt_output",
+                payload={"answer": full_output},
+                trim_payload=False,
+            )
 
     except Exception as e:
+        log_event(
+            "graphrag.error",
+            "final_answer failed",
+            trace_id=trace_id,
+            route=route,
+            stage="final_answer",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         yield f"Error saat menyusun jawaban: {str(e)}"
 
 

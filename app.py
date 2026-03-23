@@ -5,6 +5,8 @@ Streamlit app for visualizing and analyzing relationships between Indonesian leg
 
 import streamlit as st
 import os
+import uuid
+from typing import Any, cast
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
 # On Streamlit Cloud there is no .env file. Secrets entered in the dashboard
@@ -27,6 +29,9 @@ from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.conflict_logger import is_conflict_related_question, append_conflict_rows, clear_conflict_output_csv
 from utils.timeline_html import build_timeline_html
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question
+from utils.logging_config import setup_logging, log_event, get_logging_config, get_log_paths
+
+setup_logging()
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
@@ -786,7 +791,18 @@ with tab_search:
 
     if query and search_btn:
         progress_container = st.container()
+        trace_id: str | None = None
         try:
+            trace_id = str(uuid.uuid4())
+            log_event(
+                "graphrag.app",
+                "Search request started",
+                trace_id=trace_id,
+                route="entry",
+                stage="search",
+                event="query_start",
+                payload={"query": query},
+            )
             # ════════════════════════════════════════════════════════════
             # LANGGRAPH AGENTIC ROUTER PIPELINE (WITH NARRATIVE UI & STREAM)
             # ════════════════════════════════════════════════════════════
@@ -795,11 +811,18 @@ with tab_search:
             
             with progress_container.status("🤖 **Memutar Strategi Penelusuran Hukum...**", expanded=True) as status:
                 agent = create_agent()
-                final_state = {"logs": [], "narratives": [], "primary_doc_ids": [], "context_docs": {}, "answer": "", "final_chunks": []}
+                final_state = {"trace_id": trace_id, "narratives": [], "primary_doc_ids": [], "context_docs": {}, "answer": "", "final_chunks": []}
                 seen_narratives = 0
                 
                 # Execute agent and stream state updates live
-                for event in agent.stream({"query": query, "logs": [], "narratives": [], "primary_doc_ids": []}):
+                agent_input: dict[str, Any] = {
+                    "query": query,
+                    "trace_id": trace_id,
+                    "logs": [],
+                    "narratives": [],
+                    "primary_doc_ids": [],
+                }
+                for event in agent.stream(cast(Any, agent_input)):
                     for node_name, state_update in event.items():
                         final_state.update(state_update)
                         
@@ -815,79 +838,32 @@ with tab_search:
                 st.session_state.search_context_docs = final_state.get("context_docs", {})
                 st.session_state.search_edges = {"edges": []}
 
-                # Add explicit doc-id retrieval trace for full debug visibility.
-                primary_ids = final_state.get("primary_doc_ids", []) or []
-                context_ids = list((final_state.get("context_docs", {}) or {}).keys())
-                chunk_ids: list[str] = []
-                for _ch in final_state.get("final_chunks", []) or []:
-                    _did = _ch.get("doc_id", "")
-                    if _did and _did not in chunk_ids:
-                        chunk_ids.append(_did)
-
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Retrieved doc_ids (primary): " + (", ".join(primary_ids) if primary_ids else "-")
+                log_event(
+                    "graphrag.app",
+                    "Agent workflow completed",
+                    trace_id=trace_id,
+                    route=final_state.get("route", "unknown"),
+                    stage="workflow",
+                    event="workflow_complete",
+                    payload={
+                        "primary_doc_ids": final_state.get("primary_doc_ids", []) or [],
+                        "context_doc_ids": list((final_state.get("context_docs", {}) or {}).keys()),
+                        "final_chunk_count": len(final_state.get("final_chunks", []) or []),
+                    },
                 )
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Retrieved doc_ids (context_docs): " + (", ".join(context_ids) if context_ids else "-")
-                )
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Retrieved doc_ids (final_chunks): " + (", ".join(chunk_ids) if chunk_ids else "-")
-                )
-
-                # Deep retrieval diagnostics: show chunk inventory and full injected prompt.
-                chunks = final_state.get("final_chunks", []) or []
-                rel_context = final_state.get("relationship_context", "")
-                context_docs = final_state.get("context_docs", {}) or {}
-
-                chunk_count_lines = []
-                for _did, _info in context_docs.items():
-                    _count = len((_info or {}).get("chunks", []) or [])
-                    _src = (_info or {}).get("source", "-")
-                    chunk_count_lines.append(f"- {_did}: chunks={_count}, source={_src}")
-                final_state.setdefault("logs", []).append(
-                    "[Debug] context_docs chunk inventory:\n" + ("\n".join(chunk_count_lines) if chunk_count_lines else "-")
-                )
-
-                if not chunks:
-                    final_state.setdefault("logs", []).append(
-                        "[Debug] final_chunks is EMPTY. Possible causes: selected doc_ids exist but have no retrieved chunks, or all chunks filtered/deduplicated by interleaving rules."
-                    )
-
-                full_context_parts = []
-                for i, chunk in enumerate(chunks, 1):
-                    _doc_id = chunk.get("doc_id", "Unknown")
-                    _scope = chunk.get("scope", "")
-                    _content = chunk.get("content", "")
-                    full_context_parts.append(f"[{i}] {_doc_id} ({_scope}):\n{_content}")
-
-                full_context_str = "\n\n".join(full_context_parts)
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Full retrieval context (NO CUT):\n" + (full_context_str if full_context_str else "-")
-                )
-
-                injected_user_prompt = (
-                    "Pertanyaan Pengguna:\n"
-                    f"{query}\n\n"
-                    "Konteks Dokumen yang Ditemukan:\n"
-                    f"{full_context_str}"
-                )
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Injected user prompt (NO CUT):\n" + injected_user_prompt
-                )
-                final_state.setdefault("logs", []).append(
-                    "[Debug] Relationship context injected (NO CUT):\n" + (rel_context if rel_context else "-")
-                )
-            
-            with st.expander("⚙️ System Debug Logs"):
-                for log in final_state.get("logs", []):
-                    st.code(log, language="bash")
                     
             section_divider("⚖️ Analisis Hukum")
             chunks = final_state.get("final_chunks", [])
             rel_context = final_state.get("relationship_context", "")
             
             # LIVE STREAMING THE ANSWER
-            gen = ask_about_documents_stream(query, chunks, rel_context)
+            gen = ask_about_documents_stream(
+                query,
+                chunks,
+                rel_context,
+                trace_id=trace_id,
+                route=final_state.get("route", "unknown"),
+            )
             full_ans = st.write_stream(gen)
             full_ans_text = "".join(full_ans) if isinstance(full_ans, list) else str(full_ans or "")
 
@@ -941,6 +917,21 @@ with tab_search:
                 st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
             else:
                 st.caption("Tidak ada pasangan regulasi yang bisa disimpan untuk visualisasi dari hasil pertanyaan ini.")
+
+            log_event(
+                "graphrag.app",
+                "Search request completed",
+                trace_id=trace_id,
+                route=final_state.get("route", "unknown"),
+                stage="search",
+                event="query_complete",
+                payload={
+                    "answer_length": len(full_ans_text),
+                    "saved_conflict_rows": _saved,
+                    "log_paths": get_log_paths(),
+                    "verbose_logging": get_logging_config().get("verbose", False),
+                },
+            )
             
             st.session_state.search_answer = full_ans_text
             # If the agent produced a CSV of relations, render the timeline visualization
@@ -952,6 +943,16 @@ with tab_search:
                     st.markdown(_html, unsafe_allow_html=True)
 
         except Exception as e:
+            log_event(
+                "graphrag.error",
+                "Search request failed",
+                trace_id=trace_id,
+                route="search",
+                stage="search",
+                event="query_error",
+                payload={"error": str(e)},
+                level=40,
+            )
             st.error(f"Error: {e}")
             st.session_state.search_answer = None
             st.session_state.search_edges = None
