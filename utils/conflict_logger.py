@@ -9,19 +9,17 @@ from utils import neo4j_client
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 CONFLICT_OUTPUT_DIR = os.path.join(ROOT_DIR, "output", "conflict")
-CONFLICT_OUTPUT_CSV = os.path.join(CONFLICT_OUTPUT_DIR, "potential_conflict_relations.csv")
-CONFLICT_CSV_COLUMNS = [
-    "doc_1",
-    "doc_2",
-    "relation_type",
-]
+VISUALIZE_CSV = os.path.join(CONFLICT_OUTPUT_DIR, "visualize_potential_conflict.csv")
+SET_CSV = os.path.join(CONFLICT_OUTPUT_DIR, "potential_conflict_set.csv")
+VISUALIZE_COLUMNS = ["doc_1", "doc_2", "relation_type", "reasoning"]
+SET_COLUMNS = ["doc_1", "doc_2", "relation_type", "question", "reasoning"]
 
 
 def clear_conflict_output_csv() -> None:
-    """Reset conflict CSV to header-only for a new question/session run."""
+    """Reset ONLY the visualization CSV to header-only for a new question."""
     os.makedirs(CONFLICT_OUTPUT_DIR, exist_ok=True)
-    with open(CONFLICT_OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
+    with open(VISUALIZE_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=VISUALIZE_COLUMNS)
         writer.writeheader()
 
 
@@ -152,7 +150,7 @@ def _ensure_compact_csv_schema(path: str) -> None:
     """Ensure CSV has compact header; migrate compatible old rows if schema differs."""
     existing_rows = _load_existing_compact_rows(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=VISUALIZE_COLUMNS)
         writer.writeheader()
         if existing_rows:
             writer.writerows(existing_rows)
@@ -162,18 +160,25 @@ def append_conflict_rows(
     conflict_result: dict,
     primary_doc_ids: list[str],
     relationship_context: str,
+    question: str = "",
+    reasoning: str = "",
 ) -> int:
-    """Write inferred conflict relations to CSV (overwrite old logs)."""
+    """Write inferred relations to two outputs:
+    - visualize_potential_conflict.csv: reset per question (deduped per run)
+    - potential_conflict_set.csv: append full log with question + reasoning
+    """
     rows = _collect_edges_for_conflict_log(primary_doc_ids, relationship_context)
     if not rows:
         return 0
 
     os.makedirs(CONFLICT_OUTPUT_DIR, exist_ok=True)
     relation_type = _normalize_relation_type(conflict_result)
+    reason_text = reasoning or conflict_result.get("reason", "") or "-"
+    question_text = question or ""
 
-    # Overwrite with current run rows.
-    with open(CONFLICT_OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CONFLICT_CSV_COLUMNS)
+    # Overwrite visualization CSV for current run.
+    with open(VISUALIZE_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=VISUALIZE_COLUMNS)
         writer.writeheader()
         seen_out: set[tuple[str, str, str]] = set()
         for edge in rows:
@@ -181,6 +186,7 @@ def append_conflict_rows(
                 "doc_1": edge["doc1"],
                 "doc_2": edge["doc2"],
                 "relation_type": relation_type,
+                "reasoning": reason_text,
             }
             out_key = (out_row["doc_1"], out_row["doc_2"], out_row["relation_type"])
             if out_key in seen_out:
@@ -188,6 +194,23 @@ def append_conflict_rows(
             seen_out.add(out_key)
             writer.writerow(
                 out_row
+            )
+
+    # Append to full conflict set log (keep history).
+    need_header = not os.path.isfile(SET_CSV)
+    with open(SET_CSV, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=SET_COLUMNS)
+        if need_header:
+            writer.writeheader()
+        for edge in rows:
+            writer.writerow(
+                {
+                    "doc_1": edge["doc1"],
+                    "doc_2": edge["doc2"],
+                    "relation_type": relation_type,
+                    "question": question_text,
+                    "reasoning": reason_text,
+                }
             )
 
     return len(seen_out)

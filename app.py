@@ -916,40 +916,45 @@ with tab_search:
                     _chunk_ids.append(_did)
             _query_ids = list(_extract_doc_ids_from_question(query or ""))
             _answer_ids = list(_extract_doc_ids_from_question(full_ans_text or ""))
-
+            _text_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
             _all_ids = list(
                 dict.fromkeys([
                     *(_primary_ids),
                     *(_context_ids),
                     *(_chunk_ids),
-                    *(_query_ids),
-                    *(_answer_ids),
+                    *(_text_ids),
                 ])
             )
 
-            # Last-resort fallback: if parser found at least two IDs in text only.
-            if len(_all_ids) < 2:
-                _fallback_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
-                if len(_fallback_ids) >= 2:
-                    _all_ids = _fallback_ids
+            # Prefer IDs grounded in the question/answer text; fallback to all retrieved IDs.
+            if len(_text_ids) >= 2:
+                _paired_ids = _text_ids
+            elif len(_all_ids) >= 2:
+                _paired_ids = _all_ids
+            else:
+                _paired_ids = _text_ids or _all_ids
             _saved = append_conflict_rows(
                 conflict_result=conflict_result,
-                primary_doc_ids=_all_ids,
+                primary_doc_ids=_paired_ids,
                 relationship_context=rel_context,
+                question=query,
+                reasoning=conflict_result.get("reason", ""),
             )
             if _saved:
-                st.caption(f"Tersimpan {_saved} relasi ke output/conflict/potential_conflict_relations.csv")
+                st.caption(f"Tersimpan {_saved} relasi ke output/conflict/visualize_potential_conflict.csv")
             else:
                 st.caption("Tidak ada pasangan regulasi yang bisa disimpan untuk visualisasi dari hasil pertanyaan ini.")
             
             st.session_state.search_answer = full_ans_text
             # If the agent produced a CSV of relations, render the timeline visualization
-            _out_csv = os.path.join(os.path.dirname(__file__), "output", "conflict", "potential_conflict_relations.csv")
+            _out_csv = os.path.join(os.path.dirname(__file__), "output", "conflict", "visualize_potential_conflict.csv")
             if os.path.isfile(_out_csv):
-                _html = build_timeline_html(_out_csv)
-                if _html:
+                res = build_timeline_html(_out_csv)
+                if res:
+                    _html, _height = res
                     section_divider("Relasi Dokumen — Visualisasi")
-                    st.markdown(_html, unsafe_allow_html=True)
+                    import streamlit.components.v1 as components
+                    components.html(_html, height=_height, scrolling=True)
 
         except Exception as e:
             st.error(f"Error: {e}")
