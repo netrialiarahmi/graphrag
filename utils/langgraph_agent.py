@@ -308,15 +308,26 @@ def deep_research_node(state: GraphState) -> GraphState:
     return _assemble_context_for_state(state, raw_vdb_hits=raw)
 
 def generate_answer_node(state: GraphState) -> GraphState:
-    state["logs"].append("[Answer Node] Generating output")
+    state["logs"].append("[Answer Node] Preparing Context for LLM Stream")
     chunks = _build_interleaved_context(
         primary_doc_ids=state.get("primary_doc_ids", []),
         related_doc_ids=[],
         context_docs=state.get("context_docs", {}),
         max_chunks=40, max_chars=16000
     )
-    ans = llm_stance.ask_about_documents(state["query"], chunks, state.get("relationship_context", ""))
-    state["answer"] = ans
+    
+    state["logs"].append(f"\\n--- [DEBUG] FINAL CONTEXT RETRIEVED ({len(chunks)} CHUNKS) ---")
+    for i, c in enumerate(chunks[:15]):
+        scope = c.get("scope", "")
+        source_tag = "🕸️ GraphRAG (Neo4j)" if scope == "neo4j-pasal" else "🌲 Semantic (Pinecone)"
+        did = c.get("doc_id", "Unknown")
+        text = c.get('content', '').replace('\\n', ' ')[:150]
+        state["logs"].append(f" {i+1}. [{source_tag} | {did}] {text}...")
+    if len(chunks) > 15:
+        state["logs"].append(f"...and {len(chunks)-15} more chunks.")
+        
+    state["final_chunks"] = chunks
+    state["answer"] = ""
     return state
 
 def route_after_direct(state: GraphState) -> str:

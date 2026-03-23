@@ -785,49 +785,56 @@ with tab_search:
         progress_container = st.container()
         try:
             # ════════════════════════════════════════════════════════════
-            # LANGGRAPH AGENTIC ROUTER PIPELINE (WITH NARRATIVE UI)
+            # LANGGRAPH AGENTIC ROUTER PIPELINE (WITH NARRATIVE UI & STREAM)
             # ════════════════════════════════════════════════════════════
             from utils.langgraph_agent import create_agent
+            from utils.llm_stance import ask_about_documents_stream
             
             with progress_container.status("🤖 **Memutar Strategi Penelusuran Hukum...**", expanded=True) as status:
                 agent = create_agent()
-                final_state = {"logs": [], "narratives": [], "primary_doc_ids": [], "context_docs": {}, "answer": ""}
+                final_state = {"logs": [], "narratives": [], "primary_doc_ids": [], "context_docs": {}, "answer": "", "final_chunks": []}
                 seen_narratives = 0
                 
                 # Execute agent and stream state updates live
                 for event in agent.stream({"query": query, "logs": [], "narratives": [], "primary_doc_ids": []}):
                     for node_name, state_update in event.items():
-                        # Track state dynamically
                         final_state.update(state_update)
                         
-                        # Print legal 'thoughts' live to user if there are new ones
                         curr_narr = state_update.get("narratives", [])
                         if len(curr_narr) > seen_narratives:
                             for nar in curr_narr[seen_narratives:]:
-                                st.markdown(f"💭 *{nar}*")
+                                st.markdown(f"💭 {nar}")
                             seen_narratives = len(curr_narr)
                             
-                status.update(label="✅ **Analisis Hukum Selesai**", state="complete", expanded=False)
+                status.update(label="✅ **Penelusuran Selesai**", state="complete", expanded=False)
                 
-                # Update session state for UI compatibility
                 st.session_state.search_doc_ids = final_state.get("primary_doc_ids", [])
                 st.session_state.search_context_docs = final_state.get("context_docs", {})
-                st.session_state.search_answer = final_state.get("answer", "")
                 st.session_state.search_edges = {"edges": []}
             
-            # Show the raw debug logs beneath the query window!
             with st.expander("⚙️ System Debug Logs"):
                 for log in final_state.get("logs", []):
                     st.code(log, language="bash")
+                    
+            section_divider("⚖️ Analisis Hukum")
+            chunks = final_state.get("final_chunks", [])
+            rel_context = final_state.get("relationship_context", "")
+            
+            # LIVE STREAMING THE ANSWER
+            gen = ask_about_documents_stream(query, chunks, rel_context)
+            full_ans = st.write_stream(gen)
+            
+            st.session_state.search_answer = full_ans
+
         except Exception as e:
             st.error(f"Error: {e}")
             st.session_state.search_answer = None
             st.session_state.search_edges = None
 
-    # Display answer
-    if st.session_state.search_answer:
-        section_divider("Jawaban")
-        st.markdown(st.session_state.search_answer)
+    # Display answer (Now handled inside the try block for streaming)
+    # if st.session_state.search_answer:
+    #     section_divider("Jawaban")
+    #     st.markdown(st.session_state.search_answer)
 
 
 # ==============================================================================
