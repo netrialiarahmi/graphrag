@@ -4,21 +4,27 @@ Supports JSON-based Chain of Thought routing with user-friendly narratives.
 """
 import os
 import json
+import time
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
 from utils.conflict_logger import is_conflict_related_question
+from utils.logging_config import setup_logging, log_event, get_logging_config
+
+setup_logging()
 
 class GraphState(TypedDict):
     query: str
     route: str
+    trace_id: str
     primary_doc_ids: List[str]
     context_docs: Dict[str, dict]
     relationship_context: str
     answer: str
     logs: List[str]
     narratives: List[str] # User-facing legal explanations
+    final_chunks: List[dict]
 
 def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, max_chunks=30, max_chars=12000):
     result = []
@@ -56,6 +62,7 @@ def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, m
     return result
 
 def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphState:
+    start = time.perf_counter()
     doc_ids = state.get("primary_doc_ids", [])
     context_docs = state.get("context_docs", {})
     seen_chunk_ids = set()
@@ -66,9 +73,13 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
         for ch in raw_vdb_hits:
             did = ch.get("doc_id", "")
             if did in doc_ids:
+                content = ch.get("content", "").strip()
+                if not content or content.lower() in ["cukup jelas.", "cukup jelas", "(kosong)", "-"]:
+                    continue
                 context_docs.setdefault(did, {"source": "VDB", "chunks": []})
                 cid = ch.get("id")
                 if cid and cid not in seen_chunk_ids:
+                    ch["source"] = "VDB"
                     context_docs[did]["chunks"].append(ch)
                     seen_chunk_ids.add(cid)
     if neo4j_client.test_connection():
@@ -78,10 +89,13 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                 context_docs.setdefault(did, {"source": "Graph", "chunks": []})
                 for p in detail.get("pasals", []) + detail.get("ayats", []):
                     content = p.get("content", "")
-                    pid = str(p.get("name", ""))
-                    nid = f"neo-{did}-{pid}"
+                    # P0 Fix: Chunk ID collision. Use both name and hash of content for strict uniqueness
+                    pid = str(p.get("name", p.get("id", "")))
+                    import hashlib
+                    chash = hashlib.md5(content.encode('utf-8', errors='ignore')).hexdigest()[:8]
+                    nid = f"neo-{did}-{pid}-{chash}"
                     if content and len(content) > 20 and nid not in seen_chunk_ids:
-                        context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal"})
+                        context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal", "source": "Graph"})
                         seen_chunk_ids.add(nid)
             except Exception: pass
     rel_context = state.get("relationship_context", "")
@@ -95,9 +109,56 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
         except Exception: pass
     state["context_docs"] = context_docs
     state["relationship_context"] = rel_context.strip()
+
+    trace_id = state.get("trace_id")
+    route = state.get("route", "unknown")
+    total_chunks = sum(len((info or {}).get("chunks", []) or []) for info in context_docs.values())
+    log_event(
+        "graphrag.app",
+        "Context assembly completed",
+        trace_id=trace_id,
+        route=route,
+        stage="assemble_context",
+        event="retrieval_summary",
+        duration_ms=(time.perf_counter() - start) * 1000,
+        payload={
+            "doc_count": len(context_docs),
+            "total_chunks": total_chunks,
+            "doc_ids": list(context_docs.keys()),
+            "relationship_line_count": len(state["relationship_context"].splitlines()) if state.get("relationship_context") else 0,
+        },
+    )
+
+    if get_logging_config().get("verbose", False):
+        retrieval_items: list[dict[str, Any]] = []
+        for did, info in context_docs.items():
+            fallback_src = (info or {}).get("source", "-")
+            for ch in (info or {}).get("chunks", []) or []:
+                retrieval_items.append(
+                    {
+                        "doc_id": did,
+                        "chunk_id": ch.get("id", ""),
+                        "source": ch.get("source", fallback_src),
+                        "retrieval_method": ch.get("scope", "unknown"),
+                        "content": ch.get("content", ""),
+                        "score": ch.get("score"),
+                    }
+                )
+        log_event(
+            "graphrag.debug",
+            "Verbose retrieval payload",
+            trace_id=trace_id,
+            route=route,
+            stage="assemble_context",
+            event="retrieval_items",
+            payload={"retrieval_items": retrieval_items},
+            trim_payload=False,
+        )
     return state
 
 def router_node(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    trace_id = state.get("trace_id")
     query = state["query"]
     logs = state.get("logs", [])
     narratives = state.get("narratives", [])
@@ -112,6 +173,16 @@ def router_node(state: GraphState) -> GraphState:
         narratives.append(f"Saya mengenali bahwa Anda menanyakan regulasi spesifik ({list(regex_ids)[0]}). Saya akan langsung memeriksa isi dokumen tersebut.")
         state["logs"] = logs
         state["narratives"] = narratives
+        log_event(
+            "graphrag.app",
+            "Router selected direct route from regex",
+            trace_id=trace_id,
+            route="direct",
+            stage="router",
+            event="route_selected",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"matched_doc_ids": list(regex_ids)},
+        )
         return state
     elif regex_ids and conflict_intent:
         logs.append("[Router Node] Conflict intent detected; skipping direct route to gather comparison documents.")
@@ -128,6 +199,20 @@ Return ONLY valid JSON.
 """
     client = llm_stance.get_llm_client()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "Router prompt input",
+                trace_id=trace_id,
+                route="router",
+                stage="router",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": query,
+                },
+                trim_payload=False,
+            )
         router_model = os.getenv("LLM_ROUTER_MODEL", llm_stance.LLM_MODEL)
         resp = client.chat.completions.create(
             model=router_model,
@@ -136,6 +221,17 @@ Return ONLY valid JSON.
         )
         content = (resp.choices[0].message.content or "").strip()
         content = content.replace("```json", "").replace("```", "").strip()
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "Router prompt output",
+                trace_id=trace_id,
+                route="router",
+                stage="router",
+                event="prompt_output",
+                payload={"raw_response": content},
+                trim_payload=False,
+            )
         data = json.loads(content)
         
         route = data.get("route", "semantic").lower()
@@ -144,16 +240,39 @@ Return ONLY valid JSON.
         state["route"] = route if route in ["direct", "semantic", "deep"] else "semantic"
         narratives.append(thought)
         logs.append(f"[Router Node] LLM chose route: {state['route']}")
+        log_event(
+            "graphrag.app",
+            "Router selected route via LLM",
+            trace_id=trace_id,
+            route=state["route"],
+            stage="router",
+            event="route_selected",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"router_model": router_model},
+        )
     except Exception as e:
         state["route"] = "semantic"
         logs.append(f"[Router Node] Fallback to semantic. Err: {e}")
         narratives.append("Mencari jawaban melalui penelusuran semantik pada pustaka hukum...")
+        log_event(
+            "graphrag.error",
+            "Router fallback to semantic",
+            trace_id=trace_id,
+            route="semantic",
+            stage="router",
+            event="router_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         
     state["logs"] = logs
     state["narratives"] = narratives
     return state
 
 def direct_lookup_node(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    trace_id = state.get("trace_id")
     state["logs"].append("[Direct Node] Running direct meta lookup")
     query = state["query"]
     doc_ids = state.get("primary_doc_ids", [])
@@ -165,14 +284,35 @@ def direct_lookup_node(state: GraphState) -> GraphState:
     if not doc_ids:
         state["logs"].append("[Direct Node] No docs found, fallback -> semantic")
         state["route"] = "semantic"
+        log_event(
+            "graphrag.app",
+            "Direct lookup fallback to semantic",
+            trace_id=trace_id,
+            route="direct",
+            stage="direct_lookup",
+            event="fallback",
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
         return state
         
     state["primary_doc_ids"] = doc_ids
     state["logs"].append(f"[Direct Node] Found {len(doc_ids)} docs.")
     state["narratives"].append("Saya telah menemukan dokumen yang tepat, dan sedang membaca ketentuannya...")
+    log_event(
+        "graphrag.app",
+        "Direct lookup completed",
+        trace_id=trace_id,
+        route="direct",
+        stage="direct_lookup",
+        event="retrieval",
+        duration_ms=(time.perf_counter() - start) * 1000,
+        payload={"doc_ids": doc_ids, "doc_count": len(doc_ids)},
+    )
     return _assemble_context_for_state(state)
 
 def semantic_search_node(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    trace_id = state.get("trace_id")
     state["logs"].append("[Semantic Node] Searching Pinecone")
     query = state["query"]
     
@@ -183,10 +323,30 @@ def semantic_search_node(state: GraphState) -> GraphState:
     except Exception as e:
         state["logs"].append(f"[Semantic Node] VDB Err: {str(e)}. Fallback -> deep")
         state["route"] = "deep"
+        log_event(
+            "graphrag.error",
+            "Semantic search error fallback to deep",
+            trace_id=trace_id,
+            route="semantic",
+            stage="semantic_search",
+            event="semantic_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return state
 
     if not doc_ids:
         state["route"] = "deep"
+        log_event(
+            "graphrag.app",
+            "Semantic found no docs; escalating to deep",
+            trace_id=trace_id,
+            route="semantic",
+            stage="semantic_search",
+            event="fallback",
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
         return state
         
     state["logs"].append(f"[Semantic Node] Found {len(doc_ids)} docs. Checking sufficiency...")
@@ -209,6 +369,20 @@ ONLY output valid JSON.
     ctx_str = "\\n\\n".join([f"DOC {k}: {v}" for k,v in summaries.items()])
     client = llm_stance.get_llm_client()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "Semantic sufficiency prompt input",
+                trace_id=trace_id,
+                route="semantic",
+                stage="semantic_gate",
+                event="prompt_input",
+                payload={
+                    "system_prompt": sys_eval,
+                    "user_prompt": f"Query: {query}\\n\\nRetrieved Context:\\n{ctx_str}",
+                },
+                trim_payload=False,
+            )
         resp = client.chat.completions.create(
             model=os.getenv("LLM_ROUTER_MODEL", llm_stance.LLM_MODEL),
             messages=[
@@ -219,6 +393,17 @@ ONLY output valid JSON.
         )
         content = (resp.choices[0].message.content or "").strip()
         content = content.replace("```json", "").replace("```", "").strip()
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "Semantic sufficiency prompt output",
+                trace_id=trace_id,
+                route="semantic",
+                stage="semantic_gate",
+                event="prompt_output",
+                payload={"raw_response": content},
+                trim_payload=False,
+            )
         data = json.loads(content)
         
         is_sufficient = data.get("is_sufficient", True)
@@ -229,14 +414,45 @@ ONLY output valid JSON.
         if not is_sufficient:
             state["logs"].append("[Semantic Node] Gate Failed. Upgrading to deep.")
             state["route"] = "deep"
+            log_event(
+                "graphrag.app",
+                "Semantic gate failed; escalating to deep",
+                trace_id=trace_id,
+                route="semantic",
+                stage="semantic_gate",
+                event="gate_failed",
+                duration_ms=(time.perf_counter() - start) * 1000,
+                payload={"doc_count": len(doc_ids)},
+            )
             return state
             
         state["logs"].append("[Semantic Node] Gate Passed.")
+        log_event(
+            "graphrag.app",
+            "Semantic gate passed",
+            trace_id=trace_id,
+            route="semantic",
+            stage="semantic_gate",
+            event="gate_passed",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_count": len(doc_ids)},
+        )
         
     except Exception as e:
         state["logs"].append(f"[Semantic Node] Gate Err: {e}")
         # Default to false if error to be safe
         state["route"] = "deep"
+        log_event(
+            "graphrag.error",
+            "Semantic gate error",
+            trace_id=trace_id,
+            route="semantic",
+            stage="semantic_gate",
+            event="gate_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return state
         
     cur_doc_ids = state.get("primary_doc_ids", [])
@@ -246,10 +462,23 @@ ONLY output valid JSON.
     return _assemble_context_for_state(state, raw_vdb_hits=raw)
 
 def deep_research_node(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    trace_id = state.get("trace_id")
     state["logs"].append("[Deep Node] Traversing Graph and VDB heavily")
     state["narratives"].append("Sistem melakukan penelusuran hukum secara ekstensif (historis dan relasi regulasi) untuk memastikan keakuratan...")
     query = state["query"]
-    expanded = llm_stance.expand_query(query)
+    expanded = llm_stance.expand_query(query, trace_id=trace_id)
+    if get_logging_config().get("verbose", False):
+        log_event(
+            "graphrag.debug",
+            "Deep research expansion output",
+            trace_id=trace_id,
+            route="deep",
+            stage="deep_expand_query",
+            event="prompt_result",
+            payload={"query": query, "expanded_queries": expanded},
+            trim_payload=False,
+        )
     
     raw = []
     seen = set()
@@ -298,7 +527,7 @@ def deep_research_node(state: GraphState) -> GraphState:
             except Exception: pass
         doc_summaries[did] = summary[:400]
         
-    ranked = llm_stance.rerank_documents(query, doc_summaries)
+    ranked = llm_stance.rerank_documents(query, doc_summaries, trace_id=trace_id)
     top_docs = [did for did, sc in ranked if sc >= 3.0][:5]
     if not top_docs: top_docs = merged_docs[:5]
         
@@ -309,9 +538,26 @@ def deep_research_node(state: GraphState) -> GraphState:
     state["primary_doc_ids"] = cur_doc_ids
     state["logs"].append(f"[Deep Node] Reranked Top {len(cur_doc_ids)} docs.")
     state["narratives"].append(f"Berhasil merangkum {len(cur_doc_ids)} dokumen paling relevan beserta hubungannya. Sedang menyusun analisa...")
+    log_event(
+        "graphrag.app",
+        "Deep research completed",
+        trace_id=trace_id,
+        route="deep",
+        stage="deep_research",
+        event="retrieval",
+        duration_ms=(time.perf_counter() - start) * 1000,
+        payload={
+            "expanded_query_count": len(expanded),
+            "candidate_doc_count": len(merged_docs),
+            "selected_doc_count": len(cur_doc_ids),
+            "selected_doc_ids": cur_doc_ids,
+        },
+    )
     return _assemble_context_for_state(state, raw_vdb_hits=raw)
 
 def generate_answer_node(state: GraphState) -> GraphState:
+    start = time.perf_counter()
+    trace_id = state.get("trace_id")
     state["logs"].append("[Answer Node] Preparing Context for LLM Stream")
     chunks = _build_interleaved_context(
         primary_doc_ids=state.get("primary_doc_ids", []),
@@ -332,6 +578,43 @@ def generate_answer_node(state: GraphState) -> GraphState:
         
     state["final_chunks"] = chunks
     state["answer"] = ""
+    log_event(
+        "graphrag.app",
+        "Answer context prepared",
+        trace_id=trace_id,
+        route=state.get("route", "unknown"),
+        stage="generate_answer",
+        event="final_context_ready",
+        duration_ms=(time.perf_counter() - start) * 1000,
+        payload={
+            "final_chunk_count": len(chunks),
+            "final_doc_ids": list(dict.fromkeys([c.get("doc_id", "") for c in chunks if c.get("doc_id")]))
+        },
+    )
+
+    if get_logging_config().get("verbose", False):
+        log_event(
+            "graphrag.debug",
+            "Final answer context chunks",
+            trace_id=trace_id,
+            route=state.get("route", "unknown"),
+            stage="generate_answer",
+            event="retrieval_items",
+            payload={
+                "chunks": [
+                    {
+                        "doc_id": c.get("doc_id", ""),
+                        "scope": c.get("scope", ""),
+                        "source": c.get("source", ""),
+                        "chunk_id": c.get("id", ""),
+                        "content": c.get("content", ""),
+                        "score": c.get("score"),
+                    }
+                    for c in chunks
+                ]
+            },
+            trim_payload=False,
+        )
     return state
 
 def route_after_direct(state: GraphState) -> str:
