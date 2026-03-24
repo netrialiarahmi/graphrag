@@ -623,10 +623,9 @@ PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncu
 - Jika ditanya siapa yang berwenang dalam operasional: Jawab organ yang bertanggung jawab langsung sesuai konteks, bukan organ tertinggi secara hierarkis.
 - Perhatikan RELASI ANTAR-REGULASI dari Knowledge Graph — jika ada relasi CITES/HIGHER, regulasi-regulasi tersebut PASTI saling terkait.
 
-Format jawaban (WAJIB ikuti struktur ini dengan heading markdown ##):
+Format jawaban (WAJIB ikuti struktur ini):
 
-## Kesimpulan
-[Jawaban singkat dan tegas dalam 1-3 kalimat. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa.]
+[Langsung tulis jawaban singkat dan tegas dalam 1-3 kalimat TANPA heading apapun di awal. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa. JANGAN awali dengan "## Kesimpulan" atau heading lain — langsung ke substansi jawaban.]
 
 ## Dasar Hukum
 [Daftar regulasi beserta Pasal/Ayat spesifik yang menjadi landasan jawaban. Kutip secara verbatim ketentuan kunci. Gunakan format:

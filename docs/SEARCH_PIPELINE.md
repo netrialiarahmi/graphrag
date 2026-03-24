@@ -1,8 +1,13 @@
 # Search & Discover — Pipeline Documentation
 
-> GraphRAG Legal Document Relationship Explorer  
+> **App:** `search/` — GraphRAG Legal Document Relationship Explorer  
 > Tab 1: "Search & Discover" (Tanya Jawab Regulasi)  
 > **v2 — LangGraph Agentic Router Architecture**
+
+**See Also:**
+- [CHATBOT_PIPELINE.md](CHATBOT_PIPELINE.md) — `chatbot/` (multi-turn conversation + hybrid BM25 + persistent memory)
+- [KNOWLEDGE_MAP_PIPELINE.md](KNOWLEDGE_MAP_PIPELINE.md) — `knowledge_map/` (visual topic clustering + interactive graph)
+- [SEARCH_KM_PIPELINE.md](SEARCH_KM_PIPELINE.md) — `search_km/` (search + knowledge map + conflict detection)
 
 ---
 

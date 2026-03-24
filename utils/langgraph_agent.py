@@ -1,12 +1,78 @@
 """
-LangGraph Agentic RAG implementation for GraphRAG.
-Supports JSON-based Chain of Thought routing with user-friendly narratives.
+LangGraph Agentic RAG – Govnetic Chatbot
+=========================================
+
+6-node pipeline for Indonesian legal question answering.
+Uses JSON-based Chain of Thought routing with user-facing narratives.
+
+Architecture
+------------
+    ┌─────────────────────┐
+    │ summarize_if_needed  │  Compress older chat history (>6 turns)
+    └─────────┬───────────┘
+              ▼
+    ┌─────────────────────┐
+    │       router         │  LLM classifies query → direct | semantic | deep
+    └──┬──────┬──────┬────┘
+       │      │      │
+  direct  semantic  deep
+       │      │      │
+       ▼      ▼      ▼
+    ┌──────┐ ┌────────────┐ ┌──────────────┐
+    │direct│ │  semantic   │ │    deep       │
+    │lookup│ │  search     │ │  research     │
+    └──┬───┘ └─────┬──────┘ └──────┬───────┘
+       │           │               │
+       │     may escalate          │
+       │     to deep ──────────────┤
+       ▼           ▼               ▼
+    ┌─────────────────────────────────┐
+    │        generate_answer           │
+    └─────────────────────────────────┘
+
+Routing Paths
+-------------
+1. **DIRECT** – Specific regulation lookup (e.g. "Pasal 5 UU 40 Tahun 2007")
+   - Trigger : Regex detects explicit UU/PP/Perppu/Pergub reference in query
+   - Flow    : router → direct_lookup → generate_answer
+   - Method  : Exact doc_id match → Neo4j pasal/ayat fetch → VDB chunk fetch
+   - Fallback: If doc not found → escalate to semantic
+
+2. **SEMANTIC** – General legal concept (e.g. "syarat pendirian PT")
+   - Trigger : LLM router classifies query as standard rule / concept question
+   - Flow    : router → semantic_search → [generate_answer | deep_research]
+   - Method  :
+       a. Hybrid BM25 + Dense search (alpha=0.4, top_k=20)
+       b. Select top-5 unique documents
+       c. Gather all chunks per doc (VDB + Neo4j enrichment)
+       d. **LLM Re-ranking** – each chunk scored 0-10 for query relevance,
+          chunks below 4 filtered out (defeats embedding anisotropy)
+       e. Sufficiency gate – LLM checks if retrieved context is complete
+   - Escalate: If gate fails → auto-upgrade to deep
+
+3. **DEEP** – Complex multi-law analysis (e.g. "konflik UU Cipta Kerja vs UU Ketenagakerjaan")
+   - Trigger : LLM router identifies cross-regulation / exception / history query,
+               OR semantic gate escalation
+   - Flow    : router → deep_research → generate_answer
+   - Method  :
+       a. Multi-query expansion (query + 2 reformulations)
+       b. Hybrid search across all variants (top_k=25 each)
+       c. Neo4j graph traversal: smart_doc_lookup + citing docs (2-hop)
+       d. LLM doc-level reranking (score >= 3.0)
+       e. Assemble top-5 docs with full VDB + Neo4j chunks + relationships
+
+State
+-----
+GraphState carries: query, route, primary_doc_ids, context_docs,
+relationship_context, answer, logs, narratives, chat_history, summary,
+user_context.
 """
 import os
 import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from utils import neo4j_client, pinecone_client, llm_stance
+from utils.bm25_index import hybrid_search as _hybrid_search
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
 
 class GraphState(TypedDict):
@@ -192,31 +258,357 @@ def direct_lookup_node(state: GraphState) -> GraphState:
     state["narratives"].append("Dokumen regulasi berhasil ditemukan. Melakukan analisis terhadap ketentuan pasal dan ayat yang berlaku.")
     return _assemble_context_for_state(state)
 
+# ── Well-known topic → UU mapping for query expansion ──────────────────────
+_TOPIC_LAW_MAP = {
+    "perseroan terbatas": "Undang-Undang Nomor 40 Tahun 2007 tentang Perseroan Terbatas",
+    "pt": "Undang-Undang Nomor 40 Tahun 2007 tentang Perseroan Terbatas",
+    "ketenagakerjaan": "Undang-Undang Nomor 13 Tahun 2003 tentang Ketenagakerjaan",
+    "cipta kerja": "Undang-Undang Nomor 11 Tahun 2020 tentang Cipta Kerja",
+    "bangunan gedung": "Undang-Undang Nomor 28 Tahun 2002 tentang Bangunan Gedung",
+    "jasa konstruksi": "Undang-Undang Nomor 2 Tahun 2017 tentang Jasa Konstruksi",
+    "penanaman modal": "Undang-Undang Nomor 25 Tahun 2007 tentang Penanaman Modal",
+    "umkm": "Undang-Undang Nomor 20 Tahun 2008 tentang UMKM",
+    "usaha mikro": "Undang-Undang Nomor 20 Tahun 2008 tentang UMKM",
+    "perdagangan": "Undang-Undang Nomor 7 Tahun 2014 tentang Perdagangan",
+    "arsitek": "Undang-Undang Nomor 6 Tahun 2017 tentang Arsitek",
+    "pemerintahan daerah": "Undang-Undang Nomor 23 Tahun 2014 tentang Pemerintahan Daerah",
+    "bantuan hukum": "Undang-Undang Nomor 16 Tahun 2011 tentang Bantuan Hukum",
+    "perumahan": "Undang-Undang Nomor 1 Tahun 2011 tentang Perumahan dan Kawasan Permukiman",
+    "rumah susun": "Undang-Undang Nomor 20 Tahun 2011 tentang Rumah Susun",
+}
+
+def _expand_for_definition(query: str) -> list[str]:
+    """Generate definition-targeted query variants for general concept questions.
+    Includes well-known topic → UU mapping for targeted BM25 matching.
+    Rule-based (zero LLM cost, zero latency).
+    """
+    import re as _re
+    q = query.lower().strip().rstrip("?!.")
+    q = _re.sub(
+        r"^(jelaskan\s+(tentang\s+)?|apa\s+(itu\s+|yang\s+dimaksud\s+(dengan\s+)?)?|"
+        r"definisi\s+|pengertian\s+|ceritakan\s+(tentang\s+)?|"
+        r"uraikan\s+(tentang\s+)?|deskripsikan\s+)",
+        "", q
+    ).strip()
+    if not q or len(q) < 2:
+        return []
+    variants = [
+        f"{q} adalah",
+        f"definisi {q}",
+        f"pengertian {q}",
+        f"yang dimaksud dengan {q}",
+    ]
+    # Add well-known UU reference as explicit expansion
+    for topic, uu_ref in _TOPIC_LAW_MAP.items():
+        if topic in q:
+            variants.append(uu_ref)
+            break
+    return variants
+
+
+def _extract_doc_references(query: str) -> list[str]:
+    """Extract explicit law references from query text and map to doc_id format.
+
+    E.g. "UU 40 tahun 2007" → ["UU-NASIONAL-40-2007"]
+         "PP No. 16/2021"   → ["PP-NASIONAL-16-2021"]
+    Returns list of candidate doc_ids (may include aliases).
+    """
+    import re as _re
+    results = []
+    seen = set()
+    # Patterns: "UU 40 tahun 2007", "UU No. 40/2007", "UU 40/2007", "PP 16 Tahun 2021"
+    patterns = [
+        (r'(?:Permen\s+PUPR|PERMEN\s+PUPR)\s+(?:No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "PERMENPUPR"),
+        (r'(?:Permen\s+PPN|PERMEN\s+PPN)\s+(?:No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "PERMENPPN"),
+        (r'(?:Perppu|PERPPU)\s+(?:No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "PERPPU"),
+        (r'(?:Pergub|PERGUB)\s+(?:No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "PERGUB"),
+        (r'\b(?:UU|Undang-Undang)\s+(?:Nomor\s+|No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "UU"),
+        (r'\b(?:PP|Peraturan\s+Pemerintah)\s+(?:Nomor\s+|No\.?\s*)?(\d+)(?:\s+[Tt]ahun\s+|/)(\d{4})', "PP"),
+    ]
+    for pat, jenis in patterns:
+        for m in _re.finditer(pat, query, _re.IGNORECASE):
+            nomor = m.group(1)
+            tahun = m.group(2)
+            scope = "PROVINSI" if jenis == "PERGUB" else "NASIONAL"
+            doc_id = f"{jenis}-{scope}-{nomor}-{tahun}"
+            if doc_id not in seen:
+                results.append(doc_id)
+                seen.add(doc_id)
+    return results
+
+
+def _get_diverse_doc_ids(hits: list[dict], max_docs: int, max_per_doc: int = 4) -> list[str]:
+    """Extract unique doc_ids using best-chunk-per-doc ranking."""
+    best_score: dict[str, float] = {}
+    doc_count: dict[str, int] = {}
+    for h in hits:
+        did = h.get("doc_id", "")
+        if not did:
+            continue
+        score = h.get("rrf_score", 0)
+        if did not in best_score or score > best_score[did]:
+            best_score[did] = score
+        doc_count[did] = doc_count.get(did, 0) + 1
+    ranked_docs = sorted(best_score.keys(), key=lambda d: best_score[d], reverse=True)
+    return ranked_docs[:max_docs]
+
+
+def _rerank_chunks_llm(query: str, chunks: list[dict], batch_size: int = 10) -> list[dict]:
+    """Score chunks for relevance using LLM (cross-encoder equivalent).
+
+    Immune to embedding anisotropy — uses full query+document attention.
+    Returns chunks with 'rerank_score', sorted descending.
+    Only chunks with score >= 4 are returned.
+    """
+    import re as _re
+    client = llm_stance.get_llm_client()
+    scored = []
+
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i+batch_size]
+
+        chunk_texts = []
+        for j, ch in enumerate(batch):
+            content = ch.get("content", "").strip()
+            if len(content) > 500:
+                content = content[:500] + "..."
+            doc_id = ch.get("doc_id", "unknown")
+            chunk_texts.append(f"[{j}] (doc: {doc_id})\n{content}")
+
+        chunks_str = "\n\n".join(chunk_texts)
+
+        prompt = f"""Kamu adalah evaluator relevansi dokumen hukum Indonesia.
+
+PERTANYAAN PENGGUNA:
+{query}
+
+POTONGAN DOKUMEN:
+{chunks_str}
+
+Untuk setiap potongan dokumen di atas, berikan skor relevansi 0-10 terhadap pertanyaan pengguna:
+- 0-2: Tidak relevan sama sekali (boilerplate, "Cukup Jelas", topik berbeda)
+- 3-4: Sedikit relevan (topik terkait tapi tidak menjawab pertanyaan)
+- 5-7: Cukup relevan (membahas topik yang ditanyakan)
+- 8-10: Sangat relevan (langsung menjawab pertanyaan)
+
+Balas HANYA dalam format JSON array, contoh: [7, 2, 9, 0, 5]
+Jumlah elemen harus tepat {len(batch)}."""
+
+        try:
+            resp = client.chat.completions.create(
+                model=llm_stance.LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100,
+                temperature=0.0,
+            )
+            raw_resp = resp.choices[0].message.content.strip()
+            match = _re.search(r'\[[\d\s,]+\]', raw_resp)
+            if match:
+                scores = json.loads(match.group())
+            else:
+                scores = [5] * len(batch)
+        except Exception:
+            scores = [5] * len(batch)
+
+        while len(scores) < len(batch):
+            scores.append(5)
+        scores = scores[:len(batch)]
+
+        for ch, score in zip(batch, scores):
+            ch_copy = dict(ch)
+            ch_copy["rerank_score"] = int(score)
+            if int(score) >= 4:
+                scored.append(ch_copy)
+
+    scored.sort(key=lambda c: c.get("rerank_score", 0), reverse=True)
+    return scored
+
+
+def _follow_graph_edges(doc_ids: list[str], max_extra: int = 4) -> list[str]:
+    """Follow Neo4j CITES/HIGHER edges from given doc_ids to discover related docs.
+    Returns newly-discovered doc_ids not already in input list.
+    """
+    if not neo4j_client.test_connection():
+        return []
+    known = set(doc_ids)
+    new_docs = []
+    for did in doc_ids[:3]:  # limit to top-3 to control latency
+        try:
+            sub = neo4j_client.get_citing_documents(did, hops=1)
+            for n in sub.get("nodes", []):
+                ndid = n.get("doc_id", "")
+                if ndid and ndid not in known:
+                    new_docs.append(ndid)
+                    known.add(ndid)
+                    if len(new_docs) >= max_extra:
+                        return new_docs
+        except Exception:
+            pass
+    return new_docs
+
 def semantic_search_node(state: GraphState) -> GraphState:
-    state["logs"].append("[Semantic Node] Searching Pinecone")
+    """Hybrid BM25+Dense search with LLM re-ranking.
+
+    Pipeline (V1 base + LLM rerank):
+      1. Hybrid search with V1 params (alpha=0.4, top_k=20)
+      2. Flat unique doc selection (top-5)
+      3. Gather chunks per doc (VDB + Neo4j)
+      4. LLM re-rank: score each chunk 0-10, filter low-relevance
+      5. Sufficiency gate → answer or escalate to deep
+    """
+    state["logs"].append("[Semantic Node] Hybrid search (dense + BM25) + LLM rerank")
     query = state["query"]
-    
+
     try:
+        # Step 1: Hybrid BM25+Dense search (V1 params)
         emb = llm_stance.get_embedding(query)
-        raw = pinecone_client.semantic_search(query_embedding=emb, top_k=20)
-        doc_ids = _get_unique_doc_ids(raw, 5)
+        raw = _hybrid_search(query, emb, top_k=20, alpha=0.4)
+
+        # Step 2: Select top docs (V1 flat unique logic)
+        doc_ids = []
+        for h in raw:
+            did = h.get("doc_id", "")
+            if did and did not in doc_ids:
+                doc_ids.append(did)
+            if len(doc_ids) >= 5:
+                break
     except Exception as e:
-        state["logs"].append(f"[Semantic Node] VDB Err: {str(e)}. Fallback -> deep")
+        state["logs"].append(f"[Semantic Node] Hybrid Err: {str(e)}. Fallback -> deep")
         state["route"] = "deep"
         return state
 
     if not doc_ids:
         state["route"] = "deep"
         return state
-        
-    state["logs"].append(f"[Semantic Node] Dokumen ditemukan: {', '.join(doc_ids[:5])}. Memeriksa kelengkapan...")
-    summaries = {}
-    for hit in raw:
-        did = hit.get("doc_id")
-        if did and did not in summaries:
-            summaries[did] = hit.get("content", "")[:500]
 
-    # JSON Sufficiency check
+    state["logs"].append(f"[Semantic Node] Dokumen ditemukan: {', '.join(doc_ids[:5])}. Reranking chunks...")
+
+    # Step 3: Gather chunks per doc
+    context_docs = {}
+    seen_chunk_ids = set()
+    for did in doc_ids:
+        doc_chunks = [h for h in raw if h.get("doc_id") == did]
+        for ch in doc_chunks:
+            seen_chunk_ids.add(ch.get("id", ""))
+        try:
+            extra = pinecone_client.fetch_by_doc_id(did, top_k=80)
+            for ch in extra:
+                cid = ch.get("id", "")
+                if cid not in seen_chunk_ids:
+                    doc_chunks.append(ch)
+                    seen_chunk_ids.add(cid)
+        except Exception:
+            pass
+        context_docs[did] = {"source": "hybrid", "chunks": doc_chunks}
+
+    # Neo4j enrichment
+    if neo4j_client.test_connection():
+        for did in doc_ids:
+            try:
+                detail = neo4j_client.get_document_detail(did)
+                for p in detail.get("pasals", []) + detail.get("ayats", []):
+                    content = p.get("content", "")
+                    pid = str(p.get("name", ""))
+                    nid = f"neo-{did}-{pid}"
+                    if content and len(content) > 20 and nid not in seen_chunk_ids:
+                        context_docs.setdefault(did, {"source": "hybrid", "chunks": []})[
+                            "chunks"
+                        ].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal"})
+                        seen_chunk_ids.add(nid)
+            except Exception:
+                pass
+
+    # Build relationship context
+    rel_context = ""
+    if neo4j_client.test_connection():
+        try:
+            edges = neo4j_client.get_edges_between(list(context_docs.keys()))
+            lines = [f'- {e["source_id"]} --[{e["type"]}]--> {e["target_id"]}' for e in edges.get("edges", [])]
+            if lines:
+                rel_context = "\n".join(lines)
+        except Exception:
+            pass
+
+    # Collect candidate chunks (interleaved across docs)
+    all_candidates = []
+    total_chars = 0
+    doc_queues = {}
+    for did in doc_ids:
+        info = context_docs.get(did)
+        if not info:
+            continue
+        chunks = list(info["chunks"])
+        scored_chunks = sorted(
+            [c for c in chunks if c.get("score") is not None or c.get("rrf_score") is not None],
+            key=lambda c: c.get("rrf_score", 0) or c.get("score", 0), reverse=True
+        )
+        unscored = [c for c in chunks if c.get("score") is None and c.get("rrf_score") is None]
+        doc_queues[did] = scored_chunks + unscored
+
+    doc_keys = list(doc_queues.keys())
+    idx_map = {d: 0 for d in doc_keys}
+    exhausted = set()
+    seen_build = set()
+    while len(all_candidates) < 40 and total_chars < 16000 and len(exhausted) < len(doc_keys):
+        for did in doc_keys:
+            if did in exhausted:
+                continue
+            queue = doc_queues[did]
+            idx = idx_map[did]
+            if idx >= len(queue):
+                exhausted.add(did)
+                continue
+            chunk = queue[idx]
+            idx_map[did] = idx + 1
+            cid = chunk.get("id", "")
+            if cid and cid in seen_build:
+                continue
+            if cid:
+                seen_build.add(cid)
+            content = chunk.get("content", "")
+            total_chars += len(content)
+            all_candidates.append(chunk)
+            if len(all_candidates) >= 40 or total_chars >= 16000:
+                break
+
+    # Step 4: LLM Re-ranking
+    state["logs"].append(f"[Semantic Node] Reranking {len(all_candidates)} chunks via LLM...")
+    reranked = _rerank_chunks_llm(query, all_candidates)
+    state["logs"].append(f"[Semantic Node] {len(reranked)} chunks passed rerank filter (score >= 4)")
+
+    # Build final context from reranked chunks
+    llm_chunks = []
+    char_count = 0
+    for ch in reranked:
+        content = ch.get("content", "")
+        char_count += len(content)
+        llm_chunks.append(ch)
+        if len(llm_chunks) >= 30 or char_count >= 12000:
+            break
+
+    if not llm_chunks:
+        llm_chunks = all_candidates[:20]  # fallback if reranker filtered everything
+
+    # Recompute doc_ids from reranked chunks
+    reranked_doc_ids = []
+    for ch in llm_chunks:
+        did = ch.get("doc_id", "")
+        if did and did not in reranked_doc_ids:
+            reranked_doc_ids.append(did)
+
+    # Sufficiency gate
+    summaries = {}
+    for ch in llm_chunks:
+        did = ch.get("doc_id", "")
+        if not did:
+            continue
+        content = ch.get("content", "").strip()
+        if len(content) < 30:
+            continue
+        prev = summaries.get(did, "")
+        if len(content) > len(prev):
+            summaries[did] = content[:500]
+
     sys_eval = """You are a senior lawyer assessing retrieval context.
 The user asked a legal question. I have retrieved some document excerpts.
 Determine if the provided excerpts comprehensively answer the question, or if we might be missing specific exceptions, definitions, or connected laws.
@@ -226,54 +618,60 @@ Return a strict JSON object with EXACTLY two keys:
 
 ONLY output valid JSON. Example: {"thought_process": "...", "is_sufficient": true}
 """
-    # Context format
     ctx_str = "\n\n".join([f"DOC {k}: {v}" for k, v in summaries.items()])
     client = llm_stance.get_llm_client()
     try:
         resp = client.chat.completions.create(
             model=os.getenv("LLM_ROUTER_MODEL", llm_stance.LLM_MODEL),
             messages=[
-                {"role": "system", "content": sys_eval}, 
+                {"role": "system", "content": sys_eval},
                 {"role": "user", "content": f"Query: {query}\n\nRetrieved Context:\n{ctx_str}"}
             ],
             max_tokens=250, temperature=0.1
         )
         content = (resp.choices[0].message.content or "").strip()
-        # Strip markdown fences robustly
         if content.startswith("```"):
             content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         content = content.replace("```json", "").replace("```", "").strip()
-        # Try JSON parse, fallback to regex extraction
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             import re as _re
             _suf_match = _re.search(r'"is_sufficient"\s*:\s*(true|false)', content, _re.IGNORECASE)
             data = {"is_sufficient": _suf_match.group(1).lower() == "true"} if _suf_match else {"is_sufficient": False}
-        
+
         is_sufficient = data.get("is_sufficient", True)
         thought = data.get("thought_process", "Memverifikasi apakah konteks hukum cukup...")
-        
         state["narratives"].append(thought)
-        
+
         if not is_sufficient:
             state["logs"].append("[Semantic Node] Gate Failed. Upgrading to deep.")
             state["route"] = "deep"
             return state
-            
+
         state["logs"].append("[Semantic Node] Gate Passed.")
-        
     except Exception as e:
         state["logs"].append(f"[Semantic Node] Gate Err: {e}")
-        # Default to false if error to be safe
         state["route"] = "deep"
         return state
-        
+
+    # Store reranked context in state
     cur_doc_ids = state.get("primary_doc_ids", [])
-    for d in doc_ids:
-        if d not in cur_doc_ids: cur_doc_ids.append(d)
+    for d in reranked_doc_ids:
+        if d not in cur_doc_ids:
+            cur_doc_ids.append(d)
     state["primary_doc_ids"] = cur_doc_ids
-    return _assemble_context_for_state(state, raw_vdb_hits=raw)
+
+    # Build context_docs from reranked chunks
+    reranked_context = {}
+    for ch in llm_chunks:
+        did = ch.get("doc_id", "")
+        if not did:
+            continue
+        reranked_context.setdefault(did, {"source": "hybrid+rerank", "chunks": []})["chunks"].append(ch)
+    state["context_docs"] = reranked_context
+    state["relationship_context"] = rel_context.strip()
+    return state
 
 def deep_research_node(state: GraphState) -> GraphState:
     state["logs"].append("[Deep Node] Memulai penelusuran mendalam pada Graph dan VDB")
@@ -286,7 +684,7 @@ def deep_research_node(state: GraphState) -> GraphState:
     for trm in [query] + expanded[:2]:
         try:
             emb = llm_stance.get_embedding(trm)
-            hits = pinecone_client.semantic_search(query_embedding=emb, top_k=25)
+            hits = _hybrid_search(trm, emb, top_k=25, alpha=0.4)
             for h in hits:
                 if h["id"] not in seen:
                     raw.append(h)
