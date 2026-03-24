@@ -1,0 +1,81 @@
+
+============================================================
+  Semantic V1 + LLM Re-ranking Benchmark
+  File: govnetic_qa_complete_50 (business).xlsx
+============================================================
+
+[INFO] Sample mode: 12 questions selected
+
+[01/12] GOV_TC008 — Apa definisi Perseroan Terbatas menurut UU 40/2007?…
+[BM25] Index built: 4649 docs in 0.09s
+          ↳ reranking 12 chunks...
+          ↳ 4 chunks passed filter (score >= 4)
+          ↳ docs: PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020
+          ↳ verdict: PARSIAL
+[02/12] GOV_TC010 — Apa perbedaan antara Direksi dan Dewan Komisaris dalam struktur organisasi Perse…
+          ↳ reranking 12 chunks...
+          ↳ 4 chunks passed filter (score >= 4)
+          ↳ docs: UU-NASIONAL-23-2014, PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020, UU-NASIONAL-5-1999
+          ↳ verdict: BENAR
+[03/12] GOV_TC011 — Bagaimana hubungan antara UU 40/2007 dengan Perppu 2/2022 dalam hal pengaturan d…
+          ↳ reranking 13 chunks...
+          ↳ 2 chunks passed filter (score >= 4)
+          ↳ docs: UU-NASIONAL-11-2020, PERPPU-NASIONAL-2-2022
+          ↳ verdict: PARSIAL
+[04/12] GOV_TC012 — Apakah Perppu 2/2022 mengubah prosedur keputusan sirkuler yang diatur dalam UU 4…
+          ↳ reranking 27 chunks...
+          ↳ 5 chunks passed filter (score >= 4)
+          ↳ docs: UU-NASIONAL-11-2020, PERPPU-NASIONAL-2-2022
+          ↳ verdict: PARSIAL
+[05/12] GOV_TC013 — Bagaimana UU 12/2011 dan UU 13/2022 saling berhubungan dalam hal hierarki peratu…
+          ↳ reranking 33 chunks...
+          ↳ 5 chunks passed filter (score >= 4)
+          ↳ docs: UU-NASIONAL-12-2011
+          ↳ verdict: BENAR
+[06/12] GOV_TC014 — Apakah PP 29/2021 dan Permen Perdagangan 24/2021 saling melengkapi dalam mengatu…
+          ↳ reranking 26 chunks...
+          ↳ 7 chunks passed filter (score >= 4)
+          ↳ docs: PERMENDAG-NASIONAL-24-2021, UU-NASIONAL-11-2020
+          ↳ verdict: BENAR
+[07/12] GOV_TC016 — Apakah Permen PPN 7/2023 mengimplementasikan ketentuan yang ada dalam UU 40/2007…
+          ↳ reranking 28 chunks...
+          ↳ 5 chunks passed filter (score >= 4)
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, PERPPU-NASIONAL-2-2022
+          ↳ verdict: BENAR
+[08/12] GOV_TC017 — Bagaimana UU 12/2011 dan UU 13/2022 mempengaruhi penerapan asas Lex Superior Der…
+          ↳ reranking 38 chunks...
+          ↳ 0 chunks passed filter (score >= 4)
+          ↳ docs: PERPPU-NASIONAL-2-2022, UU-NASIONAL-23-2014, UU-NASIONAL-11-2020, UU-NASIONAL-11-2014, UU-NASIONAL-16-2011
+          ↳ verdict: BENAR
+[09/12] GOV_TC019 — Bagaimana mekanisme pengambilan keputusan dalam RUPS (UU 40/2007) berbeda dengan…
+          ↳ reranking 26 chunks...
+          ↳ 5 chunks passed filter (score >= 4)
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-11-2020
+          ↳ verdict: BENAR
+[10/12] GOV_TC021 — Apakah ada potensi konflik antara kewenangan Direksi (UU 40/2007) dan kewenangan…
+          ↳ reranking 37 chunks...
+          ↳ 18 chunks passed filter (score >= 4)
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-11-2020
+          ↳ verdict: BENAR
+[11/12] GOV_TC027 — Apakah ada pertentangan antara persyaratan pengecualian usaha kecil (UU 5/1999) …
+          ↳ reranking 21 chunks...
+          ↳ 6 chunks passed filter (score >= 4)
+          ↳ docs: PERMENDAG-NASIONAL-24-2021, UU-NASIONAL-11-2020, PERPPU-NASIONAL-2-2022
+          ↳ verdict: BENAR
+[12/12] GOV_TC029 — Apakah ada gap dalam Permen PPN 7/2023 tentang bagaimana menangani kegagalan pem…
+          ↳ reranking 12 chunks...
+          ↳ 4 chunks passed filter (score >= 4)
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-11-2020
+          ↳ verdict: PARSIAL
+
+============================================================
+  HASIL BENCHMARK — Semantic V1 + LLM Re-ranking
+============================================================
+  Total  : 12
+  BENAR  : 8  (66.7%)
+  PARSIAL: 4  (33.3%)
+  SALAH  : 0  (0.0%)
+
+  Output : /Users/netrialiarahmi/Library/Mobile Documents/com~apple~CloudDocs/career/govnetic/graphrag/graphrag/output/qa_benchmark_semantic_rerank_govnetic_qa_complete_50_(business).csv
+============================================================
+

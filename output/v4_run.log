@@ -1,0 +1,59 @@
+[#E81B]  _: <CONNECTION> error: Failed to read from defunct connection ResolvedIPv4Address(('47.130.205.233', 7687)) (ResolvedIPv4Address(('47.130.205.233', 7687))): TimeoutError(60, 'Operation timed out')
+[#E7DE]  _: <CONNECTION> error: Failed to read from defunct connection ResolvedIPv4Address(('122.248.207.10', 7687)) (ResolvedIPv4Address(('122.248.207.10', 7687))): TimeoutError(60, 'Operation timed out')
+
+============================================================
+  Semantic-Only V4 (Reserved Slots) Benchmark
+  File: govnetic_qa_complete_50 (business).xlsx
+============================================================
+
+[INFO] Sample mode: 12 questions selected
+
+[01/12] GOV_TC008 — Apa definisi Perseroan Terbatas menurut UU 40/2007?…
+[BM25] Index built: 4649 docs in 0.10s
+          ↳ docs: UU-NASIONAL-40-2007, PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020, PERMENPPN-NASIONAL-7-2023, PERGUB-PROVINSI-135-2019
+          ↳ verdict: PARSIAL
+[02/12] GOV_TC010 — Apa perbedaan antara Direksi dan Dewan Komisaris dalam struktur organisasi Perse…
+          ↳ docs: PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020, PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-5-1999, UU-NASIONAL-23-2014
+          ↳ verdict: BENAR
+[03/12] GOV_TC011 — Bagaimana hubungan antara UU 40/2007 dengan Perppu 2/2022 dalam hal pengaturan d…
+          ↳ docs: PERPPU-NASIONAL-2-2022, UU-NASIONAL-40-2007, UU-NASIONAL-11-2020, PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-23-2014
+          ↳ verdict: SALAH
+[04/12] GOV_TC012 — Apakah Perppu 2/2022 mengubah prosedur keputusan sirkuler yang diatur dalam UU 4…
+          ↳ docs: PERPPU-NASIONAL-2-2022, UU-NASIONAL-40-2007, UU-NASIONAL-11-2020, KEPMENSOS-NASIONAL-10-2024, PERMENPPN-NASIONAL-7-2023
+          ↳ verdict: BENAR
+[05/12] GOV_TC013 — Bagaimana UU 12/2011 dan UU 13/2022 saling berhubungan dalam hal hierarki peratu…
+          ↳ docs: UU-NASIONAL-13-2022, UU-NASIONAL-12-2011, UU-NASIONAL-31-2002, PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020
+          ↳ verdict: SALAH
+[06/12] GOV_TC014 — Apakah PP 29/2021 dan Permen Perdagangan 24/2021 saling melengkapi dalam mengatu…
+          ↳ docs: PP-NASIONAL-29-2021, PERPPU-NASIONAL-2-2022, PERMENDAG-NASIONAL-24-2021, UU-NASIONAL-11-2020, KEPMENSOS-NASIONAL-10-2024
+          ↳ verdict: BENAR
+[07/12] GOV_TC016 — Apakah Permen PPN 7/2023 mengimplementasikan ketentuan yang ada dalam UU 40/2007…
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-40-2007, KEPMENSOS-NASIONAL-10-2024, PERMENKEU-NASIONAL-29-2011, PERMENKEU-29-2011
+          ↳ verdict: SALAH
+[08/12] GOV_TC017 — Bagaimana UU 12/2011 dan UU 13/2022 mempengaruhi penerapan asas Lex Superior Der…
+          ↳ docs: UU-NASIONAL-13-2022, UU-NASIONAL-12-2011, PERPPU-NASIONAL-2-2022, UU-NASIONAL-23-2014, UU-NASIONAL-11-2020
+          ↳ verdict: PARSIAL
+[09/12] GOV_TC019 — Bagaimana mekanisme pengambilan keputusan dalam RUPS (UU 40/2007) berbeda dengan…
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-40-2007, KEPMENSOS-NASIONAL-10-2024, UU-NASIONAL-11-2020, UU-NASIONAL-12-2011
+          ↳ verdict: BENAR
+[10/12] GOV_TC021 — Apakah ada potensi konflik antara kewenangan Direksi (UU 40/2007) dan kewenangan…
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, UU-NASIONAL-40-2007, KEPMENSOS-NASIONAL-10-2024, UU-NASIONAL-11-2020, PERPPU-NASIONAL-2-2022
+          ↳ verdict: BENAR
+[11/12] GOV_TC027 — Apakah ada pertentangan antara persyaratan pengecualian usaha kecil (UU 5/1999) …
+          ↳ docs: UU-NASIONAL-5-1999, PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020, SK_DIRJEN_BK_TAHUN_2022-Penetapan_Jabker_dan_Konversi_Jabker_Eksisting, PERMENDAG-NASIONAL-24-2021
+          ↳ verdict: PARSIAL
+[12/12] GOV_TC029 — Apakah ada gap dalam Permen PPN 7/2023 tentang bagaimana menangani kegagalan pem…
+          ↳ docs: PERMENPPN-NASIONAL-7-2023, KEPMENSOS-NASIONAL-10-2024, PERPPU-NASIONAL-2-2022, UU-NASIONAL-11-2020, UU-NASIONAL-23-2014
+          ↳ verdict: PARSIAL
+
+============================================================
+  HASIL BENCHMARK — Semantic Only V4 (Reserved Slots)
+============================================================
+  Total  : 12
+  BENAR  : 5  (41.7%)
+  PARSIAL: 4  (33.3%)
+  SALAH  : 3  (25.0%)
+
+  Output : /Users/netrialiarahmi/Library/Mobile Documents/com~apple~CloudDocs/career/govnetic/graphrag/graphrag/output/qa_benchmark_semantic_v4_govnetic_qa_complete_50_(business).csv
+============================================================
+

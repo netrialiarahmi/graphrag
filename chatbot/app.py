@@ -162,6 +162,14 @@ _CSS = """
         padding: 1rem 0 !important;
         border-bottom: 1px solid #f1f5f9;
     }
+    [data-testid="stChatMessage"] h1,
+    [data-testid="stChatMessage"] h2,
+    [data-testid="stChatMessage"] h3,
+    [data-testid="stChatMessage"] h4,
+    [data-testid="stChatMessage"] p,
+    [data-testid="stChatMessage"] li {
+        text-align: left !important;
+    }
     [data-testid="stChatMessage"]:last-of-type {
         border-bottom: none;
     }
@@ -401,14 +409,6 @@ _DOC_TYPE_LABELS = {"uu": "UU", "pp": "PP", "permen": "PM", "perpres": "PR", "ot
 
 
 def _add_section_icons(md: str) -> str:
-    replacements = {
-        "## Kesimpulan": "## \u2696\uFE0F Kesimpulan",
-        "## Dasar Hukum": "## \U0001F4D6 Dasar Hukum",
-        "## Analisis Hukum": "## \U0001F50D Analisis Hukum",
-        "## Pengecualian dan Catatan": "## \u26A0\uFE0F Pengecualian dan Catatan",
-    }
-    for old, new in replacements.items():
-        md = md.replace(old, new)
     return md
 
 
@@ -551,7 +551,7 @@ with st.sidebar:
             _title_trunc = _conv["title"][:45] + ("..." if len(_conv["title"]) > 45 else "")
             _is_active = _conv["id"] == st.session_state.active_conv_id
             if st.button(
-                f"\U0001F4AC  {_title_trunc}",
+                _title_trunc,
                 key=f"conv_{_conv['id']}",
                 use_container_width=True,
                 disabled=_is_active,
