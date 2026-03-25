@@ -5,6 +5,7 @@ ChatGPT-style interface for Indonesian legal document analysis.
 
 import streamlit as st
 import os, time, re, uuid
+import atexit
 from datetime import datetime
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
@@ -38,11 +39,34 @@ _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
+_checkpointer = None
+_checkpointer_cm = None
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
-    _checkpointer = SqliteSaver.from_conn_string(_MEMORY_DB)
+
+    _candidate = SqliteSaver.from_conn_string(_MEMORY_DB)
+    if hasattr(_candidate, "__enter__") and hasattr(_candidate, "__exit__"):
+        _checkpointer_cm = _candidate
+        _checkpointer = _checkpointer_cm.__enter__()
+    else:
+        _checkpointer = _candidate
 except Exception:
-    _checkpointer = None
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+        _checkpointer = InMemorySaver()
+    except Exception:
+        _checkpointer = None
+
+
+def _close_checkpointer() -> None:
+    if _checkpointer_cm is not None:
+        try:
+            _checkpointer_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+atexit.register(_close_checkpointer)
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
