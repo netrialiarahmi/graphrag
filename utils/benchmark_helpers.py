@@ -9,7 +9,7 @@ import re
 #   PERMEN PPN  → PERMENPPN    | PERATURAN BPS → PERBANBPS
 #   PERMEN PERDAGANGAN → PERMENDAG
 JENIS_MAP = {
-    "UU": "UU", "PP": "PP", "PERPPU": "PERPPU",
+    "UU": "UU", "PP": "PP", "PERPPU": "PERPPU", "PERPRES": "PERPRES",
     "PERMEN PUPR": "PERMENPUPR", "PERMEN PPN": "PERMENPPN",
     "PERMEN PERDAGANGAN": "PERMENDAG", "PERMEN": "PERMEN",
     "PERMENKES": "PERMENKES", "PERMENDAGRI": "PERMENDAGRI",
@@ -151,6 +151,7 @@ def extract_doc_ids_from_question(question: str) -> set[str]:
         (r'(?:Permendagri|PERMENDAGRI)\s+(\d+)/(\d{4})', "PERMENDAGRI"),
         (r'(?:Pergub|PERGUB)\s+(\d+)/(\d{4})', "PERGUB"),
         (r'(?:Perppu|PERPPU)\s+(\d+)/(\d{4})', "PERPPU"),
+        (r'(?:Perpres|PERPRES)\s+(\d+)/(\d{4})', "PERPRES"),
         (r'\b(?:UU)\s+(\d+)/(\d{4})', "UU"),
         (r'\b(?:PP)\s+(\d+)/(\d{4})', "PP"),
     ]

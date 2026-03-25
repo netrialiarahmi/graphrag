@@ -23,6 +23,12 @@ import boto3
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.langsmith_config import init_langsmith
 from utils.memory import SemanticMemory
+from utils.conflict_logger import is_conflict_related_question, append_conflict_rows, clear_conflict_output_csv
+from utils.timeline_html import build_timeline_html
+from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question
+from utils.logging_config import setup_logging, log_event, get_logging_config, get_log_paths
+
+setup_logging()
 
 # ── LangSmith tracing (graceful degradation) ─────────────────────────────────
 init_langsmith()
@@ -598,8 +604,19 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
     # Generate assistant response
     with st.chat_message("assistant", avatar="\u2696\uFE0F"):
         _t_start = time.time()
+        _trace_id = str(uuid.uuid4())
         try:
             from utils.langgraph_agent import create_agent
+
+            log_event(
+                "graphrag.app",
+                "Chat request started",
+                trace_id=_trace_id,
+                route="entry",
+                stage="chat",
+                event="query_start",
+                payload={"query": prompt},
+            )
 
             with st.status("Menganalisis pertanyaan hukum...", expanded=True) as status:
                 agent = create_agent(checkpointer=_checkpointer)
@@ -651,6 +668,44 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 _cited_ids = []
                 _clean_answer = _answer_raw
 
+            # Save conflict/entailment rows for timeline visualization.
+            try:
+                clear_conflict_output_csv()
+                if is_conflict_related_question(prompt):
+                    _conflict_result = llm_stance.detect_conflict_inference(prompt, _clean_answer)
+                else:
+                    _conflict_result = {
+                        "is_conflict": False,
+                        "label": "NO_CONFLICT",
+                        "reason": "non_conflict_query_guardrail",
+                        "confidence": 1.0,
+                    }
+
+                _primary_ids = final_state.get("primary_doc_ids", []) or []
+                _context_ids = list((final_state.get("context_docs", {}) or {}).keys())
+                _query_ids = list(_extract_doc_ids_from_question(prompt or ""))
+                _answer_ids = list(_extract_doc_ids_from_question(_clean_answer or ""))
+                _text_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
+                _all_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids), *(_text_ids)]))
+
+                _grounded_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids)]))
+                if len(_grounded_ids) >= 2:
+                    _paired_ids = _grounded_ids
+                elif len(_text_ids) >= 2:
+                    _paired_ids = _text_ids
+                else:
+                    _paired_ids = _all_ids
+
+                _saved_rows = append_conflict_rows(
+                    conflict_result=_conflict_result,
+                    primary_doc_ids=_paired_ids,
+                    relationship_context=final_state.get("relationship_context", ""),
+                    question=prompt,
+                    reasoning=_conflict_result.get("reason", ""),
+                )
+            except Exception:
+                _saved_rows = 0
+
             # Render
             _new_idx = len(st.session_state.messages)
             _render_assistant_msg(
@@ -660,6 +715,18 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 logs=final_state.get("logs"),
                 msg_idx=_new_idx,
             )
+
+            if _saved_rows:
+                st.caption(f"Tersimpan {_saved_rows} relasi ke output/conflict/visualize_potential_conflict.csv")
+
+            _out_csv = os.path.join(os.path.dirname(__file__), "output", "conflict", "visualize_potential_conflict.csv")
+            if os.path.isfile(_out_csv):
+                _timeline = build_timeline_html(_out_csv)
+                if _timeline:
+                    _html, _height = _timeline
+                    st.markdown("### Relasi Dokumen - Visualisasi")
+                    import streamlit.components.v1 as components
+                    components.html(_html, height=_height, scrolling=True)
 
             # Save to messages
             st.session_state.messages.append({
@@ -693,6 +760,20 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
             except Exception:
                 pass
 
+            log_event(
+                "graphrag.app",
+                "Chat request completed",
+                trace_id=_trace_id,
+                route=final_state.get("route", "unknown"),
+                stage="chat",
+                event="query_complete",
+                payload={
+                    "saved_conflict_rows": _saved_rows,
+                    "log_paths": get_log_paths(),
+                    "verbose_logging": get_logging_config().get("verbose", False),
+                },
+            )
+
         except ConnectionError:
             _err_msg = "Koneksi ke server gagal. Periksa koneksi internet Anda."
             st.error(_err_msg)
@@ -702,6 +783,16 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
             st.error(_err_msg)
             st.session_state.messages.append({"role": "assistant", "content": _err_msg})
         except Exception as e:
+            log_event(
+                "graphrag.error",
+                "Chat request failed",
+                trace_id=_trace_id,
+                route="chat",
+                stage="chat",
+                event="query_error",
+                payload={"error": str(e)},
+                level=40,
+            )
             _err_str = str(e).lower()
             if "neo4j" in _err_str or "database" in _err_str:
                 _err_msg = f"Kesalahan database Neo4j: {e}"
