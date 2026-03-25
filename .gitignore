@@ -20,6 +20,8 @@ output/**/*.csv
 *.sqlite3
 *.log
 output/logs/
+chatbot/bm25_corpus.json
+benchmark/*.xlsx
 
 # scripts
 scripts/*
