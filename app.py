@@ -649,6 +649,7 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 _user_ctx = semantic_memory.get_user_context_prompt()
                 _init_state = {
                     "query": prompt,
+                    "trace_id": _trace_id,
                     "logs": [],
                     "narratives": [],
                     "primary_doc_ids": [],

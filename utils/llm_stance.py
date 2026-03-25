@@ -3,12 +3,13 @@
 import os
 import json
 import functools
+import time
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
-from utils.langsmith_config import get_traceable
+from utils.logging_config import setup_logging, log_event, get_logging_config
 
-traceable = get_traceable()
+setup_logging()
 
 # ---------------------------------------------------------------------------
 # Streamlit-agnostic caching: use st.cache_* when running inside Streamlit,
@@ -136,14 +137,22 @@ def get_embedding(text: str, max_retries: int = 5) -> list[float]:
 
 # ── LLM-powered query expansion ─────────────────────────────────────────────
 
-def expand_query(query: str, *, _trace_id: str = "", _route: str = "") -> list[str]:
+def expand_query(
+    query: str,
+    *,
+    _trace_id: str = "",
+    _route: str = "",
+    trace_id: str | None = None,
+    route: str | None = None,
+) -> list[str]:
     """Use GPT to generate expanded search terms for an Indonesian legal query.
 
     Returns 3-5 alternative search phrases that capture the same legal concept
     using different terminology, specific UU/PP references, and synonyms.
     """
-    from shared.debug_logger import log_event as _dlog
     client = get_llm_client()
+    tid = trace_id or _trace_id or None
+    rte = route or _route or "deep"
 
     system_prompt = """Kamu adalah pakar hukum Indonesia. Tugasmu adalah menghasilkan variasi query pencarian untuk menemukan dokumen regulasi yang relevan di database vektor.
 
@@ -162,10 +171,18 @@ Contoh: jika pertanyaan "apa itu bangunan gedung?", hasilkan:
 Format output: Satu variasi per baris, tanpa nomor atau bullet."""
 
     user_prompt = f"Pertanyaan: {query}"
-    if _trace_id:
-        _dlog(trace_id=_trace_id, route=_route, stage="expand_query", event="prompt_input",
-              message="expand_query prompt input",
-              payload={"system_prompt": system_prompt, "user_prompt": user_prompt})
+    start = time.perf_counter()
+    if get_logging_config().get("verbose", False):
+        log_event(
+            "graphrag.debug",
+            "expand_query prompt input",
+            trace_id=tid,
+            route=rte,
+            stage="expand_query",
+            event="prompt_input",
+            payload={"system_prompt": system_prompt, "user_prompt": user_prompt},
+            trim_payload=False,
+        )
 
     try:
         response = client.chat.completions.create(
@@ -181,12 +198,40 @@ Format output: Satu variasi per baris, tanpa nomor atau bullet."""
         # Parse lines, skip empty
         lines = [ln.strip().lstrip("0123456789.-) ") for ln in raw.strip().splitlines()]
         result = [ln for ln in lines if len(ln) > 5][:5]
-        if _trace_id:
-            _dlog(trace_id=_trace_id, route=_route, stage="expand_query", event="prompt_output",
-                  message="expand_query prompt output",
-                  payload={"raw_response": raw, "expanded_queries": result})
+        log_event(
+            "graphrag.app",
+            "expand_query completed",
+            trace_id=tid,
+            route=rte,
+            stage="expand_query",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"expanded_count": len(result)},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "expand_query prompt output",
+                trace_id=tid,
+                route=rte,
+                stage="expand_query",
+                event="prompt_output",
+                payload={"raw_response": raw, "expanded_queries": result},
+                trim_payload=False,
+            )
         return result
-    except Exception:
+    except Exception as e:
+        log_event(
+            "graphrag.error",
+            "expand_query failed",
+            trace_id=tid,
+            route=rte,
+            stage="expand_query",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return []  # Graceful fallback — proceed with original query only
 
 
@@ -237,7 +282,22 @@ Pertimbangkan:
 Format output: Satu doc_id per baris, urutkan dari yang PALING relevan. Maksimal 10 dokumen.
 Output HANYA doc_id, tanpa penjelasan."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "smart_doc_lookup prompt input",
+                route="direct",
+                stage="smart_doc_lookup",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "query": query,
+                    "catalog_count": len(all_docs),
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -255,14 +315,52 @@ Output HANYA doc_id, tanpa penjelasan."""
             line = line.strip().lstrip("0123456789.-) ")
             if line in valid_ids and line not in results:
                 results.append(line)
-        return results[:10]
-    except Exception:
+        picked = results[:10]
+        log_event(
+            "graphrag.app",
+            "smart_doc_lookup completed",
+            route="direct",
+            stage="smart_doc_lookup",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"catalog_count": len(all_docs), "picked_count": len(picked)},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "smart_doc_lookup prompt output",
+                route="direct",
+                stage="smart_doc_lookup",
+                event="prompt_output",
+                payload={"raw_response": raw, "picked_doc_ids": picked},
+                trim_payload=False,
+            )
+        return picked
+    except Exception as e:
+        log_event(
+            "graphrag.error",
+            "smart_doc_lookup failed",
+            route="direct",
+            stage="smart_doc_lookup",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return []
 
 
 # ── LLM-powered document re-ranking ─────────────────────────────────────────
 
-def rerank_documents(query: str, doc_summaries: dict[str, str], *, _trace_id: str = "", _route: str = "") -> list[tuple[str, float]]:
+def rerank_documents(
+    query: str,
+    doc_summaries: dict[str, str],
+    *,
+    _trace_id: str = "",
+    _route: str = "",
+    trace_id: str | None = None,
+    route: str | None = None,
+) -> list[tuple[str, float]]:
     """Re-rank candidate documents by relevance using GPT.
 
     Parameters
@@ -277,11 +375,12 @@ def rerank_documents(query: str, doc_summaries: dict[str, str], *, _trace_id: st
     list[tuple[str, float]]
         Sorted list of (doc_id, score) with score 0-10, descending.
     """
-    from shared.debug_logger import log_event as _dlog
     if not doc_summaries:
         return []
 
     client = get_llm_client()
+    tid = trace_id or _trace_id or None
+    rte = route or _route or "deep"
 
     # Build the summary block
     summary_parts = []
@@ -304,10 +403,18 @@ Skor:
 Output HANYA JSON array, tanpa teks lain."""
 
     user_prompt = f"Pertanyaan: {query}\n\nDokumen:\n{summaries_str}"
-    if _trace_id:
-        _dlog(trace_id=_trace_id, route=_route, stage="rerank_documents", event="prompt_input",
-              message="rerank_documents prompt input",
-              payload={"system_prompt": system_prompt, "user_prompt": user_prompt})
+    start = time.perf_counter()
+    if get_logging_config().get("verbose", False):
+        log_event(
+            "graphrag.debug",
+            "rerank_documents prompt input",
+            trace_id=tid,
+            route=rte,
+            stage="rerank_documents",
+            event="prompt_input",
+            payload={"system_prompt": system_prompt, "user_prompt": user_prompt},
+            trim_payload=False,
+        )
 
     try:
         response = client.chat.completions.create(
@@ -332,8 +439,40 @@ Output HANYA JSON array, tanpa teks lain."""
             if did:
                 results.append((did, score))
         results.sort(key=lambda x: x[1], reverse=True)
+        log_event(
+            "graphrag.app",
+            "rerank_documents completed",
+            trace_id=tid,
+            route=rte,
+            stage="rerank_documents",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_count": len(results)},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "rerank_documents prompt output",
+                trace_id=tid,
+                route=rte,
+                stage="rerank_documents",
+                event="prompt_output",
+                payload={"raw_response": raw, "ranked": results},
+                trim_payload=False,
+            )
         return results
-    except Exception:
+    except Exception as e:
+        log_event(
+            "graphrag.error",
+            "rerank_documents failed",
+            trace_id=tid,
+            route=rte,
+            stage="rerank_documents",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         # Fallback: return all docs with neutral score
         return [(did, 5.0) for did in doc_summaries]
 
@@ -387,7 +526,23 @@ Kriteria BELUM CUKUP:
 
 Jawab HANYA dengan satu kata: CUKUP atau BELUM"""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "judge_sufficiency prompt input",
+                route="semantic",
+                stage="judge_sufficiency",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "query": query,
+                    "doc_ids": doc_ids,
+                    "doc_summaries": doc_summaries,
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -401,8 +556,38 @@ Jawab HANYA dengan satu kata: CUKUP atau BELUM"""
             temperature=0.1,
         )
         answer = (response.choices[0].message.content or "").strip().upper()
-        return "CUKUP" in answer and "BELUM" not in answer
-    except Exception:
+        is_sufficient = "CUKUP" in answer and "BELUM" not in answer
+        log_event(
+            "graphrag.app",
+            "judge_sufficiency completed",
+            route="semantic",
+            stage="judge_sufficiency",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_count": len(doc_ids), "is_sufficient": is_sufficient},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "judge_sufficiency prompt output",
+                route="semantic",
+                stage="judge_sufficiency",
+                event="prompt_output",
+                payload={"raw_response": answer},
+                trim_payload=False,
+            )
+        return is_sufficient
+    except Exception as e:
+        log_event(
+            "graphrag.error",
+            "judge_sufficiency failed",
+            route="semantic",
+            stage="judge_sufficiency",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return False  # Conservative: proceed with full pipeline
 
 
@@ -466,7 +651,22 @@ Dokumen B ({doc_b_id}):
 
 Klasifikasikan sebagai MENDUKUNG, MENENTANG, atau NETRAL berdasarkan kerangka analitis di atas."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "classify_stance prompt input",
+                stage="classify_stance",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "doc_a_id": doc_a_id,
+                    "doc_b_id": doc_b_id,
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -497,6 +697,24 @@ Klasifikasikan sebagai MENDUKUNG, MENENTANG, atau NETRAL berdasarkan kerangka an
         if "reason" not in result:
             result["reason"] = "No explanation provided."
 
+        log_event(
+            "graphrag.app",
+            "classify_stance completed",
+            stage="classify_stance",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_a_id": doc_a_id, "doc_b_id": doc_b_id, "stance": result.get("stance"), "confidence": result.get("confidence")},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "classify_stance prompt output",
+                stage="classify_stance",
+                event="prompt_output",
+                payload={"raw_response": raw, "parsed_result": result},
+                trim_payload=False,
+            )
+
         return result
 
     except json.JSONDecodeError:
@@ -506,6 +724,15 @@ Klasifikasikan sebagai MENDUKUNG, MENENTANG, atau NETRAL berdasarkan kerangka an
             "confidence": 0.0,
         }
     except Exception as e:
+        log_event(
+            "graphrag.error",
+            "classify_stance failed",
+            stage="classify_stance",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e), "doc_a_id": doc_a_id, "doc_b_id": doc_b_id},
+            level=40,
+        )
         return {
             "stance": "NETRAL",
             "reason": f"Error: {str(e)}",
@@ -553,7 +780,9 @@ def ask_about_documents(query: str, context_chunks: list[dict],
                        relationship_context: str = "",
                        chat_history: list[dict] | None = None,
                        summary: str = "",
-                       user_context: str = "") -> str:
+                       user_context: str = "",
+                       trace_id: str | None = None,
+                       route: str = "unknown") -> str:
     """
     RAG-style question answering: given a user query and relevant context chunks,
     generate an answer grounded in the legal documents.
@@ -674,7 +903,23 @@ Instruksi:
 4. Jika ada relasi antar-regulasi di atas, GUNAKAN informasi tersebut dalam jawaban.
 5. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "ask_about_documents prompt input",
+                trace_id=trace_id,
+                route=route,
+                stage="ask_about_documents",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "context_chunk_count": len(context_chunks),
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -684,8 +929,41 @@ Instruksi:
             max_tokens=2000,
             temperature=0.2,
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+        log_event(
+            "graphrag.app",
+            "ask_about_documents completed",
+            trace_id=trace_id,
+            route=route,
+            stage="ask_about_documents",
+            event="llm_output",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"context_chunk_count": len(context_chunks), "answer_chars": len(answer or "")},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "ask_about_documents prompt output",
+                trace_id=trace_id,
+                route=route,
+                stage="ask_about_documents",
+                event="prompt_output",
+                payload={"answer": answer},
+                trim_payload=False,
+            )
+        return answer
     except Exception as e:
+        log_event(
+            "graphrag.error",
+            "ask_about_documents failed",
+            trace_id=trace_id,
+            route=route,
+            stage="ask_about_documents",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return f"Error generating answer: {str(e)}"
 
 
@@ -700,6 +978,7 @@ def summarize_conversation(chat_history: list[dict],
         role = "Pengguna" if msg.get("role") == "user" else "Asisten"
         history_text += f"{role}: {msg.get('content', '')[:400]}\n"
 
+    start = time.perf_counter()
     try:
         resp = client.chat.completions.create(
             model=LLM_MODEL,
@@ -714,8 +993,26 @@ def summarize_conversation(chat_history: list[dict],
             max_tokens=500,
             temperature=0.3,
         )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception:
+        summary = (resp.choices[0].message.content or "").strip()
+        log_event(
+            "graphrag.app",
+            "summarize_conversation completed",
+            stage="summarize_conversation",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"history_count": len(chat_history), "summary_chars": len(summary)},
+        )
+        return summary
+    except Exception as e:
+        log_event(
+            "graphrag.error",
+            "summarize_conversation failed",
+            stage="summarize_conversation",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e)},
+            level=40,
+        )
         return existing_summary
 
 
@@ -782,7 +1079,22 @@ Dokumen Pembanding ({doc_b_id}):
 Klasifikasikan hubungan kedua dokumen ini sebagai CONTRADICTION, ENTAILMENT, atau NEUTRAL berdasarkan kerangka analitis di atas.
 WAJIB: Sebutkan Pasal dan Ayat spesifik dari masing-masing dokumen yang menjadi dasar klasifikasi."""
 
+    start = time.perf_counter()
     try:
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "judge_causality prompt input",
+                stage="judge_causality",
+                event="prompt_input",
+                payload={
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "doc_a_id": doc_a_id,
+                    "doc_b_id": doc_b_id,
+                },
+                trim_payload=False,
+            )
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -808,6 +1120,24 @@ WAJIB: Sebutkan Pasal dan Ayat spesifik dari masing-masing dokumen yang menjadi 
         if "alasan" not in result:
             result["alasan"] = "Tidak ada penjelasan."
 
+        log_event(
+            "graphrag.app",
+            "judge_causality completed",
+            stage="judge_causality",
+            event="prompt_result",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"doc_a_id": doc_a_id, "doc_b_id": doc_b_id, "kausalitas": result.get("kausalitas")},
+        )
+        if get_logging_config().get("verbose", False):
+            log_event(
+                "graphrag.debug",
+                "judge_causality prompt output",
+                stage="judge_causality",
+                event="prompt_output",
+                payload={"raw_response": raw, "parsed_result": result},
+                trim_payload=False,
+            )
+
         return result
 
     except json.JSONDecodeError:
@@ -816,6 +1146,15 @@ WAJIB: Sebutkan Pasal dan Ayat spesifik dari masing-masing dokumen yang menjadi 
             "alasan": f"Gagal memproses respons LLM: {raw[:200]}",
         }
     except Exception as e:
+        log_event(
+            "graphrag.error",
+            "judge_causality failed",
+            stage="judge_causality",
+            event="prompt_error",
+            duration_ms=(time.perf_counter() - start) * 1000,
+            payload={"error": str(e), "doc_a_id": doc_a_id, "doc_b_id": doc_b_id},
+            level=40,
+        )
         return {
             "kausalitas": "NEUTRAL",
             "alasan": f"Error: {str(e)}",
