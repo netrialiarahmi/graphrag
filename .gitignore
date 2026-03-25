@@ -12,6 +12,15 @@ venv/
 output/**/*.csv
 .DS_Store
 
+# Runtime artifacts (local only)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+output/logs/
+
 # scripts
 scripts/*
 scripts
