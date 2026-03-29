@@ -4,6 +4,7 @@ import os
 import functools
 import certifi
 from neo4j import GraphDatabase
+from neo4j.exceptions import Neo4jError
 from dotenv import load_dotenv
 
 # Fix SSL on macOS Python 3.10 — set env var BEFORE any SSL connection is made.
@@ -39,25 +40,59 @@ def _cache_data(**kwargs):
 
 load_dotenv()
 
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USER")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+def _get_neo4j_settings() -> tuple[str, str, str]:
+    """Resolve Neo4j credentials from environment with common alias fallback."""
+    uri = os.getenv("NEO4J_URI") or os.getenv("NEO4J_URL") or ""
+    user = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or ""
+    password = os.getenv("NEO4J_PASSWORD") or ""
+    return uri.strip(), user.strip(), password
+
+
+def get_connection_diagnostics() -> tuple[bool, str]:
+    """Return (ok, message) to help diagnose deploy connection issues."""
+    uri, user, password = _get_neo4j_settings()
+    missing = []
+    if not uri:
+        missing.append("NEO4J_URI")
+    if not user:
+        missing.append("NEO4J_USER")
+    if not password:
+        missing.append("NEO4J_PASSWORD")
+
+    if missing:
+        return False, f"Missing env: {', '.join(missing)}"
+
+    try:
+        driver = get_driver()
+        driver.verify_connectivity()
+        return True, "connected"
+    except Neo4jError as e:
+        msg = str(e)
+        low = msg.lower()
+        if "unauthorized" in low or "authentication" in low:
+            return False, "Authentication failed (check Neo4j username/password)."
+        if "dns" in low or "name or service not known" in low or "failed to resolve" in low:
+            return False, "Host/URI not resolvable (check NEO4J_URI)."
+        if "certificate" in low or "ssl" in low or "tls" in low:
+            return False, "TLS/certificate issue (verify neo4j+s URI and cert chain)."
+        return False, f"Neo4j error: {msg}"
+    except Exception as e:
+        return False, f"Connection error: {e}"
 
 
 @_cache_resource
 def get_driver():
     """Create and cache a Neo4j driver instance."""
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    uri, user, password = _get_neo4j_settings()
+    if not uri or not user or not password:
+        raise ValueError("Neo4j env vars are incomplete. Require NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD.")
+    return GraphDatabase.driver(uri, auth=(user, password))
 
 
 def test_connection() -> bool:
     """Test if Neo4j connection is alive."""
-    try:
-        driver = get_driver()
-        driver.verify_connectivity()
-        return True
-    except Exception:
-        return False
+    ok, _ = get_connection_diagnostics()
+    return ok
 
 
 @_cache_data(ttl=3600)

@@ -7,13 +7,31 @@ import streamlit as st
 import os, time, re, uuid
 import atexit
 from datetime import datetime
+from collections.abc import Mapping
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
 try:
+    def _inject_secret_env(prefix: str, value) -> None:
+        if isinstance(value, Mapping):
+            for child_key, child_value in value.items():
+                child_prefix = f"{prefix}_{str(child_key).upper()}" if prefix else str(child_key).upper()
+                _inject_secret_env(child_prefix, child_value)
+            return
+
+        if value is None:
+            return
+
+        if isinstance(value, (str, int, float, bool)):
+            os.environ.setdefault(prefix, str(value))
+
     if hasattr(st, "secrets") and len(st.secrets):
         for key, value in st.secrets.items():
-            if isinstance(value, str):
-                os.environ.setdefault(key, value)
+            top_key = str(key)
+            # Backward compatible: keep exact top-level key names.
+            if isinstance(value, (str, int, float, bool)) and top_key:
+                os.environ.setdefault(top_key, str(value))
+            # New behavior: support nested sections via SECTION_SUBKEY naming.
+            _inject_secret_env(top_key.upper(), value)
 except Exception:
     pass
 
@@ -365,7 +383,7 @@ for _k, _v in _defaults.items():
 # ══════════════════════════════════════════════════════════════════════════════
 # CONNECTION CHECKS
 # ══════════════════════════════════════════════════════════════════════════════
-neo4j_ok = neo4j_client.test_connection()
+neo4j_ok, neo4j_diag = neo4j_client.get_connection_diagnostics()
 pinecone_ok = pinecone_client.test_connection()
 
 
@@ -492,12 +510,6 @@ def _render_assistant_msg(content: str, doc_ids: list | None = None,
             for did in doc_ids:
                 _render_doc_card(did)
 
-    # Debug logs
-    if logs:
-        with st.expander("\U0001F527 Catatan Teknis"):
-            for log in logs:
-                st.code(log, language="bash")
-
     # Feedback
     _fb_key = hash(content[:100]) if content else msg_idx
     if _fb_key not in st.session_state.feedback_given:
@@ -563,6 +575,8 @@ with st.sidebar:
         f"</div>",
         unsafe_allow_html=True,
     )
+    if not neo4j_ok:
+        st.caption(f"Neo4j detail: {neo4j_diag}")
 
     # Chat history (from SQLite)
     _saved_convs = semantic_memory.get_all_conversation_titles()
@@ -694,6 +708,8 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 _clean_answer = _answer_raw
 
             # Save conflict/entailment rows for timeline visualization.
+            _neo4j_ok_local = False
+            _paired_ids = []
             try:
                 clear_conflict_output_csv()
                 if is_conflict_related_question(prompt):
@@ -711,23 +727,41 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 _query_ids = list(_extract_doc_ids_from_question(prompt or ""))
                 _answer_ids = list(_extract_doc_ids_from_question(_clean_answer or ""))
                 _text_ids = list(dict.fromkeys([*(_query_ids), *(_answer_ids)]))
+
+                # Guardrail: only keep IDs that truly exist in Neo4j before timeline pairing.
+                _neo4j_ok_local = neo4j_client.test_connection()
+
+                def _filter_existing_ids(_ids):
+                    _uniq = list(dict.fromkeys(_ids or []))
+                    if not _neo4j_ok_local:
+                        return []
+                    _valid = []
+                    for _did in _uniq:
+                        try:
+                            if neo4j_client.get_document_detail(_did):
+                                _valid.append(_did)
+                        except Exception:
+                            pass
+                    return _valid
+
+                _primary_ids = _filter_existing_ids(_primary_ids)
+                _context_ids = _filter_existing_ids(_context_ids)
+                _text_ids = _filter_existing_ids(_text_ids)
                 _all_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids), *(_text_ids)]))
 
                 _grounded_ids = list(dict.fromkeys([*(_primary_ids), *(_context_ids)]))
-                if len(_grounded_ids) >= 2:
-                    _paired_ids = _grounded_ids
-                elif len(_text_ids) >= 2:
-                    _paired_ids = _text_ids
-                else:
-                    _paired_ids = _all_ids
+                # Fail-closed: relationship visualization only uses Neo4j-validated grounded IDs.
+                _paired_ids = _grounded_ids if len(_grounded_ids) >= 2 else []
 
-                _saved_rows = append_conflict_rows(
-                    conflict_result=_conflict_result,
-                    primary_doc_ids=_paired_ids,
-                    relationship_context=final_state.get("relationship_context", ""),
-                    question=prompt,
-                    reasoning=_conflict_result.get("reason", ""),
-                )
+                _saved_rows = 0
+                if _paired_ids:
+                    _saved_rows = append_conflict_rows(
+                        conflict_result=_conflict_result,
+                        primary_doc_ids=_paired_ids,
+                        relationship_context=final_state.get("relationship_context", ""),
+                        question=prompt,
+                        reasoning=_conflict_result.get("reason", ""),
+                    )
             except Exception:
                 _saved_rows = 0
 
@@ -743,6 +777,10 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
 
             if _saved_rows:
                 st.caption(f"Tersimpan {_saved_rows} relasi ke output/conflict/visualize_potential_conflict.csv")
+            elif not _neo4j_ok_local:
+                st.caption("Visualisasi relasi dimatikan karena koneksi Neo4j tidak tersedia.")
+            elif len(_paired_ids) < 2:
+                st.caption("Visualisasi relasi tidak ditampilkan karena kurang dari 2 dokumen tervalidasi Neo4j.")
 
             _out_csv = os.path.join(os.path.dirname(__file__), "output", "conflict", "visualize_potential_conflict.csv")
             if os.path.isfile(_out_csv):

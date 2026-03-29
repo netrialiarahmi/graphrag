@@ -128,6 +128,25 @@ def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, m
             if len(result) >= max_chunks or total_chars >= max_chars: break
     return result
 
+
+def _filter_valid_neo4j_doc_ids(doc_ids: list[str]) -> list[str]:
+    """Return only doc_ids that exist in Neo4j (order-preserving, deduplicated)."""
+    if not doc_ids:
+        return []
+
+    deduped = list(dict.fromkeys(doc_ids))
+    if not neo4j_client.test_connection():
+        return deduped
+
+    valid = []
+    for did in deduped:
+        try:
+            if neo4j_client.get_document_detail(did):
+                valid.append(did)
+        except Exception:
+            pass
+    return valid
+
 def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphState:
     start = time.perf_counter()
     trace_id = state.get("trace_id")
@@ -166,6 +185,8 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                         seen_chunk_ids.add(nid)
             except Exception: pass
         state["primary_doc_ids"] = valid_doc_ids
+        valid_set = set(valid_doc_ids)
+        context_docs = {did: info for did, info in context_docs.items() if did in valid_set}
     rel_context = state.get("relationship_context", "")
     if neo4j_client.test_connection():
         try:
@@ -907,11 +928,13 @@ ONLY output valid JSON. Example: {"thought_process": "...", "is_sufficient": tru
         )
         return state
 
-    # Store reranked context in state
+    # Store reranked context in state (strict Neo4j validation when available)
     cur_doc_ids = state.get("primary_doc_ids", [])
     for d in reranked_doc_ids:
         if d not in cur_doc_ids:
             cur_doc_ids.append(d)
+    cur_doc_ids = _filter_valid_neo4j_doc_ids(cur_doc_ids)
+    valid_set = set(cur_doc_ids)
     state["primary_doc_ids"] = cur_doc_ids
 
     # Build context_docs from reranked chunks
@@ -919,6 +942,8 @@ ONLY output valid JSON. Example: {"thought_process": "...", "is_sufficient": tru
     for ch in llm_chunks:
         did = ch.get("doc_id", "")
         if not did:
+            continue
+        if valid_set and did not in valid_set:
             continue
         reranked_context.setdefault(did, {"source": "hybrid+rerank", "chunks": []})["chunks"].append(ch)
     state["context_docs"] = reranked_context
