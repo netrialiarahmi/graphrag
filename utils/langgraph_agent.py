@@ -68,6 +68,7 @@ relationship_context, answer, logs, narratives, chat_history, summary,
 user_context.
 """
 import os
+import re
 import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
@@ -123,13 +124,72 @@ def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, m
             if len(result) >= max_chunks or total_chars >= max_chars: break
     return result
 
+def _keyword_score(text: str, keywords: list[str]) -> float:
+    """Score text by keyword overlap — higher means more relevant."""
+    text_lower = text.lower()
+    return sum(1.0 for kw in keywords if kw in text_lower)
+
+# ── Known sibling/successor laws for cross-validation ──────────────────────
+# Laws that cover the same subject matter — when one is referenced,
+# the sibling should be searched too for supplementary content.
+_SIBLING_LAW_MAP: dict[str, list[str]] = {
+    "PERPPU-NASIONAL-2-2022": ["UU-NASIONAL-11-2020"],
+    "UU-NASIONAL-11-2020":    ["PERPPU-NASIONAL-2-2022"],
+    "UU-NASIONAL-6-2023":     ["PERPPU-NASIONAL-2-2022", "UU-NASIONAL-11-2020"],
+}
+
+# Known inter-document relationships that may be missing from the graph.
+_KNOWN_RELATIONSHIPS: list[tuple[str, str, str]] = [
+    ("PERPPU-NASIONAL-2-2022", "CITES",  "UU-NASIONAL-40-2007"),
+    ("PERPPU-NASIONAL-2-2022", "CITES",  "UU-NASIONAL-11-2020"),
+    ("UU-NASIONAL-11-2020",    "CITES",  "UU-NASIONAL-40-2007"),
+    ("UU-NASIONAL-6-2023",     "CITES",  "PERPPU-NASIONAL-2-2022"),
+]
+
+def _expand_with_siblings(doc_ids: list[str]) -> list[str]:
+    """Expand doc list with known sibling/successor laws."""
+    expanded = list(doc_ids)
+    seen = set(expanded)
+    for did in doc_ids:
+        for sib in _SIBLING_LAW_MAP.get(did, []):
+            if sib not in seen:
+                expanded.append(sib)
+                seen.add(sib)
+    return expanded
+
+def _inject_known_relationships(doc_ids: list[str], existing_rel: str) -> str:
+    """Add known relationships that may be missing from the graph."""
+    id_set = set(doc_ids)
+    lines = []
+    for src, rel, tgt in _KNOWN_RELATIONSHIPS:
+        if src in id_set or tgt in id_set:
+            line = f"- {src} --[{rel}]--> {tgt}"
+            if line not in existing_rel:
+                lines.append(line)
+    if lines:
+        return (existing_rel + "\n" + "\n".join(lines)).strip()
+    return existing_rel
+
 def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphState:
     doc_ids = state.get("primary_doc_ids", [])
+
+    # Cross-validate: expand with sibling laws
+    doc_ids = _expand_with_siblings(doc_ids)
+    state["primary_doc_ids"] = doc_ids
     context_docs = state.get("context_docs", {})
     seen_chunk_ids = set()
     for d, info in context_docs.items():
         for ch in info.get("chunks", []):
             if ch.get("id"): seen_chunk_ids.add(ch["id"])
+
+    # Build keyword list from query for scoring Neo4j chunks
+    _q_words = re.findall(r'[a-zA-Z\u00C0-\u024F]+', state.get("query", "").lower())
+    _stopwords = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "dalam",
+                  "ini", "itu", "adalah", "pada", "atau", "bahwa", "sebagai",
+                  "antara", "bagaimana", "apa", "apakah", "tidak", "ada",
+                  "tentang", "hal", "tahun", "nomor", "pasal"}
+    _keywords = [w for w in _q_words if w not in _stopwords and len(w) > 2]
+
     if raw_vdb_hits:
         for ch in raw_vdb_hits:
             did = ch.get("doc_id", "")
@@ -139,18 +199,64 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                 if cid and cid not in seen_chunk_ids:
                     context_docs[did]["chunks"].append(ch)
                     seen_chunk_ids.add(cid)
+
+    # Track which docs already have VDB-scored chunks
+    _docs_with_vdb = set()
+    for did, info in context_docs.items():
+        if any(ch.get("score") is not None for ch in info.get("chunks", [])):
+            _docs_with_vdb.add(did)
+
+    # For docs without VDB hits, do a targeted Pinecone search
+    _docs_needing_vdb = [d for d in doc_ids if d not in _docs_with_vdb]
+    if _docs_needing_vdb and _keywords:
+        try:
+            emb = llm_stance.get_embedding(state.get("query", ""))
+            pc_index = pinecone_client.get_index()
+            for did in _docs_needing_vdb[:5]:
+                try:
+                    res = pc_index.query(
+                        vector=emb, top_k=10,
+                        include_metadata=True,
+                        filter={"doc_id": did},
+                    )
+                    context_docs.setdefault(did, {"source": "VDB-targeted", "chunks": []})
+                    for m in res.get("matches", []):
+                        cid = m["id"]
+                        if cid not in seen_chunk_ids:
+                            meta = m.get("metadata", {})
+                            context_docs[did]["chunks"].append({
+                                "id": cid, "doc_id": did,
+                                "content": meta.get("content", ""),
+                                "scope": meta.get("scope", ""),
+                                "score": round(m["score"], 4),
+                            })
+                            seen_chunk_ids.add(cid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     if neo4j_client.test_connection():
         for did in doc_ids:
             try:
                 detail = neo4j_client.get_document_detail(did)
                 context_docs.setdefault(did, {"source": "Graph", "chunks": []})
+                neo_chunks = []
                 for p in detail.get("pasals", []) + detail.get("ayats", []):
                     content = p.get("content", "")
                     pid = str(p.get("name", ""))
                     nid = f"neo-{did}-{pid}"
                     if content and len(content) > 20 and nid not in seen_chunk_ids:
-                        context_docs[did]["chunks"].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal"})
+                        kscore = _keyword_score(content, _keywords)
+                        neo_chunks.append({"id": nid, "doc_id": did, "content": content,
+                                           "scope": "neo4j-pasal", "_kscore": kscore})
                         seen_chunk_ids.add(nid)
+                # Sort Neo4j chunks by keyword relevance (desc) so topic-relevant
+                # pasals surface first in the context window
+                neo_chunks.sort(key=lambda c: c["_kscore"], reverse=True)
+                for ch in neo_chunks:
+                    ch.pop("_kscore", None)
+                context_docs[did]["chunks"].extend(neo_chunks)
             except Exception: pass
     rel_context = state.get("relationship_context", "")
     if neo4j_client.test_connection():
@@ -161,8 +267,17 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                 new_rels = "\\n".join(lines)
                 if new_rels not in rel_context: rel_context += "\\n" + new_rels
         except Exception: pass
+    # Inject known relationships that may be missing from the graph
+    rel_context = _inject_known_relationships(doc_ids, rel_context)
     state["context_docs"] = context_docs
     state["relationship_context"] = rel_context.strip()
+    # Debug: log chunk counts per doc
+    _logs = state.get("logs", [])
+    for did, info in context_docs.items():
+        _logs.append(f"[Context] {did}: {len(info.get('chunks', []))} chunks (src={info.get('source', '?')})")
+    if rel_context:
+        _logs.append(f"[Context] Relationships: {rel_context[:600]}")
+    state["logs"] = _logs
     return state
 
 def _build_history_context(state: GraphState) -> str:
@@ -186,6 +301,30 @@ def router_node(state: GraphState) -> GraphState:
     logs.append("[Router Node] Started analysis")
     
     regex_ids = _extract_doc_ids_from_question(query)
+
+    # If the query references multiple regulations AND asks an analytical
+    # question (relationship, conflict, comparison, history), route to deep
+    # so the full graph traversal + reranking pipeline runs.
+    _analytical_keywords = [
+        "hubungan", "konflik", "bertentangan", "pertentangan", "perbandingan",
+        "membandingkan", "tumpang tindih", "disharmoni", "lex specialis",
+        "lex posterior", "lex superior", "harmonisasi", "keterkaitan",
+        "mengubah", "mencabut", "menggantikan", "perubahan",
+        "amandemen", "riwayat", "sejarah", "perbedaan",
+    ]
+    _q_lower = query.lower()
+    _is_analytical = any(kw in _q_lower for kw in _analytical_keywords)
+
+    if regex_ids and len(regex_ids) >= 2 and _is_analytical:
+        # Multi-law analytical question → deep research for full context
+        state["route"] = "deep"
+        state["primary_doc_ids"] = list(regex_ids)
+        logs.append(f"[Router Node] Regex hit ({len(regex_ids)} docs) + analytical query → deep")
+        narratives.append(f"Teridentifikasi rujukan terhadap {len(regex_ids)} regulasi ({', '.join(list(regex_ids))}). Pertanyaan bersifat analitis, diperlukan penelusuran mendalam terhadap relasi antar-peraturan.")
+        state["logs"] = logs
+        state["narratives"] = narratives
+        return state
+
     if regex_ids:
         state["route"] = "direct"
         state["primary_doc_ids"] = list(regex_ids)
@@ -252,9 +391,25 @@ def direct_lookup_node(state: GraphState) -> GraphState:
         state["logs"].append("[Direct Node] No docs found, fallback -> semantic")
         state["route"] = "semantic"
         return state
-        
+
+    # Graph expansion: follow CITES/HIGHER edges to discover related docs
+    if neo4j_client.test_connection():
+        known = set(doc_ids)
+        for did in list(doc_ids):
+            try:
+                sub = neo4j_client.get_citing_documents(did, hops=1)
+                for n in sub.get("nodes", []):
+                    ndid = n.get("doc_id", "")
+                    if ndid and ndid not in known:
+                        doc_ids.append(ndid)
+                        known.add(ndid)
+            except Exception:
+                pass
+        if len(doc_ids) > len(state.get("primary_doc_ids", [])):
+            state["logs"].append(f"[Direct Node] Graph expansion: {len(known)} docs total")
+
     state["primary_doc_ids"] = doc_ids
-    state["logs"].append(f"[Direct Node] Dokumen ditemukan: {', '.join(doc_ids[:5])}")
+    state["logs"].append(f"[Direct Node] Dokumen ditemukan: {', '.join(doc_ids[:8])}")
     state["narratives"].append("Dokumen regulasi berhasil ditemukan. Melakukan analisis terhadap ketentuan pasal dan ayat yang berlaku.")
     return _assemble_context_for_state(state)
 
@@ -713,6 +868,13 @@ def deep_research_node(state: GraphState) -> GraphState:
                         added.add(ndid)
             except Exception: pass
                 
+    # Also include sibling laws in the candidate pool
+    for did in list(merged_docs):
+        for sib in _SIBLING_LAW_MAP.get(did, []):
+            if sib not in added:
+                merged_docs.append(sib)
+                added.add(sib)
+
     doc_summaries = {}
     for did in merged_docs[:15]:
         summary = ""
@@ -721,8 +883,16 @@ def deep_research_node(state: GraphState) -> GraphState:
         if not summary and neo4j_client.test_connection():
             try:
                 dtl = neo4j_client.get_document_detail(did)
-                ps = dtl.get("pasals", [])
-                if ps: summary = ps[0].get("content", "")
+                # Check pasals first, then ayats (pasals often have NULL content)
+                for p in dtl.get("pasals", []):
+                    if p.get("content") and len(p["content"]) > 30:
+                        summary = p["content"]
+                        break
+                if not summary:
+                    for a in dtl.get("ayats", []):
+                        if a.get("content") and len(a["content"]) > 30:
+                            summary = a["content"]
+                            break
             except Exception: pass
         doc_summaries[did] = summary[:400]
         
