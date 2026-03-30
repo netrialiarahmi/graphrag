@@ -4,7 +4,7 @@ ChatGPT-style interface for Indonesian legal document analysis.
 """
 
 import streamlit as st
-import os, time, re, uuid
+import os, time, re, uuid, logging
 from datetime import datetime
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
@@ -32,6 +32,27 @@ from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_do
 
 # ── LangSmith tracing (graceful degradation) ─────────────────────────────────
 init_langsmith()
+
+# ── File logger ───────────────────────────────────────────────────────────────
+_LOG_DIR = os.path.join(os.path.dirname(__file__), "output", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_PATH = os.path.join(_LOG_DIR, "app.log")
+_file_logger = logging.getLogger("graphrag.app_file")
+if not _file_logger.handlers:
+    _file_logger.setLevel(logging.INFO)
+    _fh = logging.FileHandler(_LOG_PATH, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+    _file_logger.addHandler(_fh)
+    _file_logger.propagate = False
+
+
+def _write_log(lines: list[str] | None, query: str = "", latency: float = 0.0):
+    """Append agent debug logs to output/logs/app.log."""
+    if not lines:
+        return
+    _file_logger.info("query=%s | latency=%.1fs", query, latency)
+    for line in lines:
+        _file_logger.info("  %s", line)
 
 # ── Persistent memory ────────────────────────────────────────────────────────
 _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
@@ -470,12 +491,6 @@ def _render_assistant_msg(content: str, doc_ids: list | None = None,
             for did in doc_ids:
                 _render_doc_card(did)
 
-    # Debug logs
-    if logs:
-        with st.expander("\U0001F527 Catatan Teknis"):
-            for log in logs:
-                st.code(log, language="bash")
-
     # Feedback
     _fb_key = hash(content[:100]) if content else msg_idx
     if _fb_key not in st.session_state.feedback_given:
@@ -592,7 +607,6 @@ for _i, _msg in enumerate(st.session_state.messages):
                 content=_msg.get("content", ""),
                 doc_ids=_msg.get("doc_ids"),
                 latency=_msg.get("latency"),
-                logs=_msg.get("logs"),
                 msg_idx=_i,
             )
 
@@ -661,11 +675,13 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
 
             # Render
             _new_idx = len(st.session_state.messages)
+            # Write debug logs to file
+            _write_log(final_state.get("logs"), query=prompt, latency=_latency)
+
             _render_assistant_msg(
                 content=_clean_answer,
                 doc_ids=_cited_ids if _cited_ids else None,
                 latency=_latency,
-                logs=final_state.get("logs"),
                 msg_idx=_new_idx,
             )
 
@@ -675,7 +691,6 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 "content": _clean_answer,
                 "doc_ids": _cited_ids,
                 "latency": _latency,
-                "logs": final_state.get("logs", []),
             })
 
             # Auto-save conversation
