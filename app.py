@@ -23,6 +23,12 @@ import boto3
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.langsmith_config import init_langsmith
 from utils.memory import SemanticMemory
+from utils.conflict_logger import (
+    is_conflict_related_question, append_conflict_rows, clear_conflict_output_csv,
+    VISUALIZE_CSV,
+)
+from utils.timeline_html import build_timeline_html
+from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question
 
 # ── LangSmith tracing (graceful degradation) ─────────────────────────────────
 init_langsmith()
@@ -34,7 +40,9 @@ semantic_memory = SemanticMemory(_MEMORY_DB)
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
-    _checkpointer = SqliteSaver.from_conn_string(_MEMORY_DB)
+    import sqlite3
+    _conn = sqlite3.connect(_MEMORY_DB, check_same_thread=False)
+    _checkpointer = SqliteSaver(_conn)
 except Exception:
     _checkpointer = None
 
@@ -680,6 +688,63 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
             _new_summary = final_state.get("summary", "")
             if _new_summary:
                 st.session_state.summary = _new_summary
+
+            # ── Visualization: document relation timeline ─────────────
+            try:
+                clear_conflict_output_csv()
+
+                _primary_ids = final_state.get("primary_doc_ids", []) or []
+                _context_ids = list((final_state.get("context_docs", {}) or {}).keys())
+                _query_ids = list(_extract_doc_ids_from_question(prompt or ""))
+                _answer_ids = list(_extract_doc_ids_from_question(_clean_answer or ""))
+                _text_ids_raw = list(dict.fromkeys([*_query_ids, *_answer_ids]))
+
+                # Validate text-extracted IDs against Neo4j
+                _text_ids = []
+                if neo4j_ok:
+                    for _did in _text_ids_raw:
+                        try:
+                            if neo4j_client.get_document_detail(_did):
+                                _text_ids.append(_did)
+                        except Exception:
+                            pass
+
+                _grounded_ids = list(dict.fromkeys([*_primary_ids, *_context_ids]))
+                if len(_grounded_ids) >= 2:
+                    _paired_ids = _grounded_ids
+                elif len(_text_ids) >= 2:
+                    _paired_ids = _text_ids
+                else:
+                    _paired_ids = list(dict.fromkeys([*_grounded_ids, *_text_ids]))
+
+                if len(_paired_ids) >= 2:
+                    if is_conflict_related_question(prompt):
+                        _conflict_result = llm_stance.detect_conflict_inference(prompt, _clean_answer)
+                    else:
+                        _conflict_result = {
+                            "is_conflict": False,
+                            "label": "NO_CONFLICT",
+                            "reason": "non_conflict_query_guardrail",
+                            "confidence": 1.0,
+                        }
+
+                    _rel_ctx = final_state.get("relationship_context", "")
+                    append_conflict_rows(
+                        conflict_result=_conflict_result,
+                        primary_doc_ids=_paired_ids,
+                        relationship_context=_rel_ctx,
+                        question=prompt,
+                        reasoning=_conflict_result.get("reason", ""),
+                    )
+
+                    if os.path.isfile(VISUALIZE_CSV):
+                        _viz = build_timeline_html(VISUALIZE_CSV)
+                        if _viz:
+                            _html, _height = _viz
+                            import streamlit.components.v1 as components
+                            components.html(_html, height=_height, scrolling=True)
+            except Exception:
+                pass
 
             # Log to semantic memory
             try:

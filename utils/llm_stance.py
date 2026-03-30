@@ -607,7 +607,7 @@ PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncu
 
 ═══ CARA MENJAWAB ═══
 
-1. MULAI dengan KESIMPULAN TEGAS di kalimat pertama. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa: "Ya, ada potensi konflik...", "Ya, terdapat ambiguitas...", "Tidak sepenuhnya, karena...".
+1. MULAI LANGSUNG dengan KESIMPULAN TEGAS dalam 1-3 kalimat TANPA heading apapun. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa: "Ya, ada potensi konflik...", "Ya, terdapat ambiguitas...", "Tidak sepenuhnya, karena...". DILARANG KERAS menulis "## Kesimpulan" atau heading lain sebelum kalimat pertama.
 2. Berikan analisis hukum substantif seperti konsultan hukum profesional.
 3. WAJIB periksa PENGECUALIAN, PEMBATASAN, dan KETENTUAN KHUSUS. Banyak UU memuat pasal pengecualian. Selalu cek dan sebutkan.
 4. Dokumen yang dilampirkan adalah REFERENSI UTAMA. Baca SELURUH konten. Kutip Pasal dan Ayat spesifik.
@@ -623,24 +623,30 @@ PENTING: Di luar tiga kondisi di atas, dalam praktik ketatanegaraan sering muncu
 - Jika ditanya siapa yang berwenang dalam operasional: Jawab organ yang bertanggung jawab langsung sesuai konteks, bukan organ tertinggi secara hierarkis.
 - Perhatikan RELASI ANTAR-REGULASI dari Knowledge Graph — jika ada relasi CITES/HIGHER, regulasi-regulasi tersebut PASTI saling terkait.
 
-Format jawaban (WAJIB ikuti struktur ini):
+═══ FORMAT JAWABAN — WAJIB IKUTI PERSIS ═══
 
-[Langsung tulis jawaban singkat dan tegas dalam 1-3 kalimat TANPA heading apapun di awal. Jika pertanyaan memiliki nuansa, gunakan jawaban bernuansa. JANGAN awali dengan "## Kesimpulan" atau heading lain — langsung ke substansi jawaban.]
+Struktur jawaban HARUS SELALU seperti ini, TANPA VARIASI:
+
+[Langsung tulis kesimpulan tegas 1-3 kalimat di sini. TANPA heading. TANPA "## Kesimpulan". TANPA heading lain. Langsung kalimat jawaban.]
 
 ## Dasar Hukum
-[Daftar regulasi beserta Pasal/Ayat spesifik yang menjadi landasan jawaban. Kutip secara verbatim ketentuan kunci. Gunakan format:
 - **[doc_id]** Pasal X ayat (Y): "kutipan relevan"
-]
+- **[doc_id]** Pasal X ayat (Y): "kutipan relevan"
 
 ## Analisis Hukum
 [Pembahasan substansif: bagaimana regulasi-regulasi tersebut menjawab pertanyaan, termasuk penjelasan prinsip hukum yang berlaku.]
 
 ## Pengecualian dan Catatan
-[Pengecualian, pembatasan, ketentuan khusus, atau implikasi praktis yang perlu diperhatikan. Jika tidak ada, tulis "Tidak ditemukan pengecualian spesifik dalam regulasi yang dikaji."]
+[Pengecualian, pembatasan, ketentuan khusus, atau implikasi praktis. Jika tidak ada, tulis "Tidak ditemukan pengecualian spesifik dalam regulasi yang dikaji."]
 
-Di baris PALING AKHIR (setelah semua konten), WAJIB tulis:
-DASAR_HUKUM: [daftar doc_id yang menjadi dasar hukum, dipisahkan koma. Hanya cantumkan regulasi yang substantif mendukung jawaban, BUKAN yang disebut sebagai "tidak mengatur". Jika regulasi yang menjadi dasar hukum utama TIDAK ADA dalam dokumen yang disediakan di atas, tetap cantumkan doc_id-nya berdasarkan pengetahuanmu.]
-Contoh: DASAR_HUKUM: UU-NASIONAL-40-2007, PP-NASIONAL-16-2021"""
+DASAR_HUKUM: doc_id_1, doc_id_2
+
+ATURAN KETAT:
+- DILARANG menambah heading "## Kesimpulan" atau heading apapun sebelum kalimat pertama.
+- DILARANG menghilangkan salah satu dari tiga heading: ## Dasar Hukum, ## Analisis Hukum, ## Pengecualian dan Catatan.
+- DILARANG menambah heading selain tiga heading di atas.
+- Baris PALING AKHIR HARUS berupa DASAR_HUKUM: diikuti daftar doc_id yang substantif mendukung jawaban.
+- Contoh: DASAR_HUKUM: UU-NASIONAL-40-2007, PP-NASIONAL-16-2021"""
 
     rel_section = ""
     if relationship_context:
@@ -668,11 +674,12 @@ Contoh: DASAR_HUKUM: UU-NASIONAL-40-2007, PP-NASIONAL-16-2021"""
 Pertanyaan: {query}
 
 Instruksi:
-1. Jawab dengan kesimpulan tegas di kalimat pertama.
-2. Kutip Pasal dan Ayat spesifik dari dokumen di atas.
-3. Periksa apakah ada PENGECUALIAN atau PEMBATASAN dalam regulasi yang dikutip.
-4. Jika ada relasi antar-regulasi di atas, GUNAKAN informasi tersebut dalam jawaban.
-5. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
+1. LANGSUNG tulis kesimpulan tegas di kalimat pertama TANPA heading apapun (DILARANG tulis "## Kesimpulan").
+2. Lanjutkan dengan ## Dasar Hukum → ## Analisis Hukum → ## Pengecualian dan Catatan → DASAR_HUKUM:
+3. Kutip Pasal dan Ayat spesifik dari dokumen di atas.
+4. Periksa apakah ada PENGECUALIAN atau PEMBATASAN dalam regulasi yang dikutip.
+5. Jika ada relasi antar-regulasi di atas, GUNAKAN informasi tersebut dalam jawaban.
+6. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
 
     try:
         response = client.chat.completions.create(
@@ -819,4 +826,84 @@ WAJIB: Sebutkan Pasal dan Ayat spesifik dari masing-masing dokumen yang menjadi 
         return {
             "kausalitas": "NEUTRAL",
             "alasan": f"Error: {str(e)}",
+        }
+
+
+def detect_conflict_inference(query: str, answer: str) -> dict:
+    """
+    Decide whether the final answer indicates potential legal conflict.
+
+    Returns:
+        {
+            "is_conflict": bool,
+            "label": "CONFLICT" | "NO_CONFLICT",
+            "reason": str,
+            "confidence": float
+        }
+    """
+    client = get_llm_client()
+
+    system_prompt = """Kamu adalah evaluator keluaran QA hukum.
+Tentukan apakah jawaban model menyimpulkan ADA konflik/pertentangan/potensi konflik/ambiguitas normatif antar regulasi.
+
+Aturan:
+- Nilai CONFLICT jika jawaban menyatakan ada konflik langsung, potensi konflik, disharmoni, tumpang tindih kewenangan, ketegangan lex specialis, atau ambiguitas transisional yang berdampak konflik normatif.
+- Nilai NO_CONFLICT jika jawaban menyatakan harmonis, tidak bertentangan, atau tidak ada potensi konflik.
+- Fokus pada KESIMPULAN jawaban, bukan hanya kata kunci tunggal.
+
+Kembalikan JSON valid SAJA dengan format:
+{"is_conflict": true/false, "label": "CONFLICT|NO_CONFLICT", "reason": "ringkas 1 kalimat", "confidence": 0.0-1.0}
+"""
+
+    user_prompt = f"Pertanyaan:\n{query}\n\nJawaban Model:\n{answer}"
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=180,
+            temperature=0.0,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw)
+
+        is_conflict = bool(data.get("is_conflict", False))
+        label = str(data.get("label", "NO_CONFLICT")).upper()
+        if label not in {"CONFLICT", "NO_CONFLICT"}:
+            label = "CONFLICT" if is_conflict else "NO_CONFLICT"
+        reason = str(data.get("reason", ""))
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        return {
+            "is_conflict": is_conflict,
+            "label": label,
+            "reason": reason,
+            "confidence": confidence,
+        }
+    except Exception:
+        text = (answer or "").lower()
+        positive_markers = [
+            "potensi konflik", "terdapat konflik", "ada konflik",
+            "bertentangan", "disharmoni", "tumpang tindih", "ambiguitas",
+        ]
+        negative_markers = [
+            "tidak ada konflik", "tidak bertentangan", "harmonis",
+            "saling menguatkan", "komplementer",
+        ]
+        has_positive = any(m in text for m in positive_markers)
+        has_negative = any(m in text for m in negative_markers)
+        is_conflict = has_positive and not has_negative
+        return {
+            "is_conflict": is_conflict,
+            "label": "CONFLICT" if is_conflict else "NO_CONFLICT",
+            "reason": "fallback-heuristic",
+            "confidence": 0.55 if is_conflict else 0.5,
         }
