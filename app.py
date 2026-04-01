@@ -86,9 +86,11 @@ else:
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
         import sqlite3
-        _conn = sqlite3.connect(_MEMORY_DB, check_same_thread=False)
+        _CHECKPOINT_DB = os.path.join(os.path.dirname(__file__), "checkpointer.db")
+        _conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False, timeout=30)
+        _conn.execute("PRAGMA journal_mode=WAL")
         _checkpointer = SqliteSaver(_conn)
-        print(f"[CHECKPOINTER] ✅ SqliteSaver initialized at {_MEMORY_DB}", file=sys.stderr)
+        print(f"[CHECKPOINTER] ✅ SqliteSaver initialized at {_CHECKPOINT_DB}", file=sys.stderr)
     except ImportError:
         print("[CHECKPOINTER] ⚠️  SqliteSaver not available. Checkpointer disabled.", file=sys.stderr)
         _checkpointer = None
