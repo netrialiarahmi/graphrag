@@ -59,23 +59,42 @@ _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
+import sys
 _checkpointer = None
-_is_deployed = "STREAMLIT_SERVER_RUNDIR" in os.environ or os.environ.get("ENVIRONMENT") == "production"
+
+# Detect deployment environment
+_is_streamlit_cloud = "STREAMLIT_SERVER_RUNDIR" in os.environ
+_is_production = os.environ.get("ENVIRONMENT") in ("production", "deployed")
+_runtime_is_docker = os.path.exists("/.dockerenv")
+_is_deployed = _is_streamlit_cloud or _is_production or _runtime_is_docker
+
+# Log environment detection
+print(f"[CHECKPOINTER] StreamlitCloud={_is_streamlit_cloud}, Production={_is_production}, Docker={_runtime_is_docker}, Deployed={_is_deployed}", file=sys.stderr)
 
 if _is_deployed:
-    # Use InMemorySaver for Streamlit Cloud (no file persistence available)
+    # ✅ Streamlit Cloud / Production: Use InMemorySaver (no file I/O issues)
+    print("[CHECKPOINTER] Using InMemorySaver for deployed environment", file=sys.stderr)
     try:
         from langgraph.checkpoint.memory import InMemorySaver
         _checkpointer = InMemorySaver()
-    except Exception:
+        print("[CHECKPOINTER] InMemorySaver initialized successfully", file=sys.stderr)
+    except Exception as e:
+        print(f"[CHECKPOINTER] Failed to create InMemorySaver: {e}", file=sys.stderr)
         _checkpointer = None
 else:
-    # Use SqliteSaver for local development (file persistence available)
+    # ✅ Local development: Use SqliteSaver (persistent state)
+    print("[CHECKPOINTER] Using SqliteSaver for local development", file=sys.stderr)
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
         _checkpointer = SqliteSaver(_MEMORY_DB)
-    except Exception:
+        print(f"[CHECKPOINTER] SqliteSaver initialized at {_MEMORY_DB}", file=sys.stderr)
+    except Exception as e:
+        print(f"[CHECKPOINTER] Failed to create SqliteSaver: {e}", file=sys.stderr)
         _checkpointer = None
+
+# Final safety check
+if _checkpointer is not None:
+    print(f"[CHECKPOINTER] Type: {type(_checkpointer).__name__}", file=sys.stderr)
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(

@@ -988,6 +988,15 @@ def create_agent(checkpointer=None):
     workflow.add_edge("generate_answer", END)
     
     compile_kwargs = {}
+    
+    # Validation: Only use checkpointer if it's a valid BaseCheckpointSaver instance
     if checkpointer is not None:
-        compile_kwargs["checkpointer"] = checkpointer
+        # Check if it has the required methods for a checkpoint saver
+        if hasattr(checkpointer, 'get_tuple') and hasattr(checkpointer, 'put_writes'):
+            compile_kwargs["checkpointer"] = checkpointer
+        else:
+            # Log warning and ignore invalid checkpointer
+            import sys
+            print(f"[WARN] Invalid checkpointer type: {type(checkpointer).__name__}. Ignoring.", file=sys.stderr)
+    
     return workflow.compile(**compile_kwargs)
