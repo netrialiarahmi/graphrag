@@ -59,13 +59,23 @@ _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
-try:
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    import sqlite3
-    _conn = sqlite3.connect(_MEMORY_DB, check_same_thread=False)
-    _checkpointer = SqliteSaver(_conn)
-except Exception:
-    _checkpointer = None
+_checkpointer = None
+_is_deployed = "STREAMLIT_SERVER_RUNDIR" in os.environ or os.environ.get("ENVIRONMENT") == "production"
+
+if _is_deployed:
+    # Use InMemorySaver for Streamlit Cloud (no file persistence available)
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+        _checkpointer = InMemorySaver()
+    except Exception:
+        _checkpointer = None
+else:
+    # Use SqliteSaver for local development (file persistence available)
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        _checkpointer = SqliteSaver(_MEMORY_DB)
+    except Exception:
+        _checkpointer = None
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
