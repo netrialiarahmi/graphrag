@@ -72,6 +72,7 @@ import re
 import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
+import atexit
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.bm25_index import hybrid_search as _hybrid_search
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
@@ -962,6 +963,20 @@ def summarize_if_needed_node(state: GraphState) -> GraphState:
     return state
 
 
+def _normalize_checkpointer(candidate):
+    """Accept saver instances and context-manager wrappers from factory helpers."""
+    if candidate is None or candidate is True or candidate is False:
+        return candidate
+
+    # If a context manager is provided (e.g., SqliteSaver.from_conn_string), enter it once.
+    if hasattr(candidate, "__enter__") and hasattr(candidate, "__exit__"):
+        entered = candidate.__enter__()
+        atexit.register(lambda: candidate.__exit__(None, None, None))
+        return entered
+
+    return candidate
+
+
 def create_agent(checkpointer=None):
     workflow = StateGraph(GraphState)
     workflow.add_node("summarize_if_needed", summarize_if_needed_node)
@@ -988,7 +1003,8 @@ def create_agent(checkpointer=None):
     workflow.add_edge("generate_answer", END)
     
     compile_kwargs = {}
-    if checkpointer is not None:
-        compile_kwargs["checkpointer"] = checkpointer
+    safe_checkpointer = _normalize_checkpointer(checkpointer)
+    if safe_checkpointer is not None:
+        compile_kwargs["checkpointer"] = safe_checkpointer
     
     return workflow.compile(**compile_kwargs)

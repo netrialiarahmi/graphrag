@@ -655,6 +655,10 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
             from utils.langgraph_agent import create_agent
 
             with st.status("Menganalisis pertanyaan hukum...", expanded=True) as status:
+                print(
+                    f"[CHECKPOINTER] Passing into create_agent: {type(_checkpointer).__name__ if _checkpointer is not None else 'None'}",
+                    file=sys.stderr,
+                )
                 agent = create_agent(checkpointer=_checkpointer)
 
                 # Build initial state with memory context
