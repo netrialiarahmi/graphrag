@@ -760,7 +760,10 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                             pass
 
                 _grounded_ids = list(dict.fromkeys([*_primary_ids, *_context_ids]))
-                if len(_grounded_ids) >= 2:
+                # Prioritize cited IDs from "Dasar Hukum" section
+                if _cited_ids and len(_cited_ids) >= 2:
+                    _paired_ids = list(dict.fromkeys(_cited_ids))
+                elif len(_grounded_ids) >= 2:
                     _paired_ids = _grounded_ids
                 elif len(_text_ids) >= 2:
                     _paired_ids = _text_ids
