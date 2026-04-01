@@ -963,9 +963,6 @@ def summarize_if_needed_node(state: GraphState) -> GraphState:
 
 
 def create_agent(checkpointer=None):
-    import sys
-    from types import GeneratorType
-    
     workflow = StateGraph(GraphState)
     workflow.add_node("summarize_if_needed", summarize_if_needed_node)
     workflow.add_node("router", router_node)
@@ -991,24 +988,7 @@ def create_agent(checkpointer=None):
     workflow.add_edge("generate_answer", END)
     
     compile_kwargs = {}
-    
-    # Comprehensive checkpointer validation
     if checkpointer is not None:
-        _type_name = type(checkpointer).__name__
-        _type_str = str(type(checkpointer))
-        
-        # Red flags: context managers, generators, or invalid types
-        if any(bad in _type_str for bad in ['GeneratorContextManager', 'contextmanager', '_GeneratorContextManager', 'contextlib']):
-            print(f"[AGENT] ❌ Context manager detected: {_type_str}. Disabling checkpointer.", file=sys.stderr)
-            checkpointer = None
-        elif hasattr(checkpointer, '__enter__') and hasattr(checkpointer, '__exit__') and not hasattr(checkpointer, 'get_tuple'):
-            print(f"[AGENT] ❌ Object is a context manager but not a valid saver. Disabling.", file=sys.stderr)
-            checkpointer = None
-        elif hasattr(checkpointer, 'get_tuple') and hasattr(checkpointer, 'put_writes'):
-            print(f"[AGENT] ✅ Valid checkpointer: {_type_name}", file=sys.stderr)
-            compile_kwargs["checkpointer"] = checkpointer
-        else:
-            print(f"[AGENT] ⚠️  Unknown checkpointer type: {_type_name}. Attempting to use it anyway.", file=sys.stderr)
-            compile_kwargs["checkpointer"] = checkpointer
+        compile_kwargs["checkpointer"] = checkpointer
     
     return workflow.compile(**compile_kwargs)
