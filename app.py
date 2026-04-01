@@ -59,11 +59,16 @@ _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
+_checkpointer = None
 try:
-    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph_checkpoint_sqlite import SqliteSaver
     _checkpointer = SqliteSaver(_MEMORY_DB)
-except Exception:
-    _checkpointer = None
+except Exception as e:
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        _checkpointer = SqliteSaver(_MEMORY_DB)
+    except Exception:
+        _checkpointer = None
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
