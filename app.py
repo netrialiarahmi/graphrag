@@ -655,11 +655,22 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
             from utils.langgraph_agent import create_agent
 
             with st.status("Menganalisis pertanyaan hukum...", expanded=True) as status:
+                _safe_checkpointer = _checkpointer
+                try:
+                    from langgraph.checkpoint.base import BaseCheckpointSaver
+                    if _safe_checkpointer not in (None, True, False) and not isinstance(_safe_checkpointer, BaseCheckpointSaver):
+                        print(
+                            f"[CHECKPOINTER] Invalid type before create_agent: {type(_safe_checkpointer).__name__}. Fallback to None.",
+                            file=sys.stderr,
+                        )
+                        _safe_checkpointer = None
+                except Exception:
+                    _safe_checkpointer = None
                 print(
-                    f"[CHECKPOINTER] Passing into create_agent: {type(_checkpointer).__name__ if _checkpointer is not None else 'None'}",
+                    f"[CHECKPOINTER] Passing into create_agent: {type(_safe_checkpointer).__name__ if _safe_checkpointer is not None else 'None'}",
                     file=sys.stderr,
                 )
-                agent = create_agent(checkpointer=_checkpointer)
+                agent = create_agent(checkpointer=_safe_checkpointer)
 
                 # Build initial state with memory context
                 _user_ctx = semantic_memory.get_user_context_prompt()

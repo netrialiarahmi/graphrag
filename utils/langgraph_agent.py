@@ -75,6 +75,7 @@ from langgraph.graph import StateGraph, END
 import atexit
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.bm25_index import hybrid_search as _hybrid_search
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from utils.benchmark_helpers import extract_doc_ids_from_question as _extract_doc_ids_from_question, get_unique_doc_ids as _get_unique_doc_ids
 
 class GraphState(TypedDict):
@@ -970,11 +971,20 @@ def _normalize_checkpointer(candidate):
 
     # If a context manager is provided (e.g., SqliteSaver.from_conn_string), enter it once.
     if hasattr(candidate, "__enter__") and hasattr(candidate, "__exit__"):
-        entered = candidate.__enter__()
-        atexit.register(lambda: candidate.__exit__(None, None, None))
-        return entered
+        try:
+            entered = candidate.__enter__()
+            atexit.register(lambda: candidate.__exit__(None, None, None))
+            if isinstance(entered, BaseCheckpointSaver):
+                return entered
+            return None
+        except Exception:
+            return None
 
-    return candidate
+    if isinstance(candidate, BaseCheckpointSaver):
+        return candidate
+
+    # Defensive fallback: invalid objects are ignored to prevent runtime crashes.
+    return None
 
 
 def create_agent(checkpointer=None):
