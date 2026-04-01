@@ -60,6 +60,7 @@ semantic_memory = SemanticMemory(_MEMORY_DB)
 
 # ── LangGraph checkpointer ───────────────────────────────────────────────────
 import sys
+from inspect import isclass, ismethod
 _checkpointer = None
 
 # Detect deployment environment
@@ -68,33 +69,45 @@ _is_production = os.environ.get("ENVIRONMENT") in ("production", "deployed")
 _runtime_is_docker = os.path.exists("/.dockerenv")
 _is_deployed = _is_streamlit_cloud or _is_production or _runtime_is_docker
 
-# Log environment detection
-print(f"[CHECKPOINTER] StreamlitCloud={_is_streamlit_cloud}, Production={_is_production}, Docker={_runtime_is_docker}, Deployed={_is_deployed}", file=sys.stderr)
+print(f"[CHECKPOINTER] StreamlitCloud={_is_streamlit_cloud}, Production={_is_production}, Docker={_runtime_is_docker}", file=sys.stderr)
 
 if _is_deployed:
-    # ✅ Streamlit Cloud / Production: Use InMemorySaver (no file I/O issues)
-    print("[CHECKPOINTER] Using InMemorySaver for deployed environment", file=sys.stderr)
+    # ✅ Streamlit Cloud / Production: Try InMemorySaver, but disable if it fails
+    print("[CHECKPOINTER] Deployment detected - attempting InMemorySaver", file=sys.stderr)
     try:
         from langgraph.checkpoint.memory import InMemorySaver
-        _checkpointer = InMemorySaver()
-        print("[CHECKPOINTER] InMemorySaver initialized successfully", file=sys.stderr)
+        _test_saver = InMemorySaver()
+        print(f"[CHECKPOINTER] InMemorySaver created: {type(_test_saver).__name__}", file=sys.stderr)
+        
+        # Validate it's not a context manager
+        if hasattr(_test_saver, '__enter__') and hasattr(_test_saver, '__exit__'):
+            print(f"[CHECKPOINTER] ⚠️  InMemorySaver is a context manager! Disabling checkpointer.", file=sys.stderr)
+            _checkpointer = None
+        elif 'GeneratorContextManager' in str(type(_test_saver)):
+            print(f"[CHECKPOINTER] ⚠️  Invalid type: {type(_test_saver)}. Disabling checkpointer.", file=sys.stderr)
+            _checkpointer = None
+        else:
+            _checkpointer = _test_saver
+            print("[CHECKPOINTER] ✅ InMemorySaver ready", file=sys.stderr)
+    except ImportError as e:
+        print(f"[CHECKPOINTER] ImportError: {e}. Disabling checkpointer.", file=sys.stderr)
+        _checkpointer = None
     except Exception as e:
-        print(f"[CHECKPOINTER] Failed to create InMemorySaver: {e}", file=sys.stderr)
+        print(f"[CHECKPOINTER] Error initializing InMemorySaver: {type(e).__name__}: {e}. Disabling checkpointer.", file=sys.stderr)
         _checkpointer = None
 else:
-    # ✅ Local development: Use SqliteSaver (persistent state)
-    print("[CHECKPOINTER] Using SqliteSaver for local development", file=sys.stderr)
+    # ✅ Local development: Use SqliteSaver
+    print("[CHECKPOINTER] Local development detected - using SqliteSaver", file=sys.stderr)
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
         _checkpointer = SqliteSaver(_MEMORY_DB)
-        print(f"[CHECKPOINTER] SqliteSaver initialized at {_MEMORY_DB}", file=sys.stderr)
+        print(f"[CHECKPOINTER] ✅ SqliteSaver ready at {_MEMORY_DB}", file=sys.stderr)
     except Exception as e:
-        print(f"[CHECKPOINTER] Failed to create SqliteSaver: {e}", file=sys.stderr)
+        print(f"[CHECKPOINTER] Error initializing SqliteSaver: {type(e).__name__}: {e}. Disabling checkpointer.", file=sys.stderr)
         _checkpointer = None
 
-# Final safety check
-if _checkpointer is not None:
-    print(f"[CHECKPOINTER] Type: {type(_checkpointer).__name__}", file=sys.stderr)
+# Final validation
+print(f"[CHECKPOINTER] Final state: {type(_checkpointer).__name__ if _checkpointer else 'None'}", file=sys.stderr)
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(

@@ -963,6 +963,9 @@ def summarize_if_needed_node(state: GraphState) -> GraphState:
 
 
 def create_agent(checkpointer=None):
+    import sys
+    from types import GeneratorType
+    
     workflow = StateGraph(GraphState)
     workflow.add_node("summarize_if_needed", summarize_if_needed_node)
     workflow.add_node("router", router_node)
@@ -989,14 +992,23 @@ def create_agent(checkpointer=None):
     
     compile_kwargs = {}
     
-    # Validation: Only use checkpointer if it's a valid BaseCheckpointSaver instance
+    # Comprehensive checkpointer validation
     if checkpointer is not None:
-        # Check if it has the required methods for a checkpoint saver
-        if hasattr(checkpointer, 'get_tuple') and hasattr(checkpointer, 'put_writes'):
+        _type_name = type(checkpointer).__name__
+        _type_str = str(type(checkpointer))
+        
+        # Red flags: context managers, generators, or invalid types
+        if any(bad in _type_str for bad in ['GeneratorContextManager', 'contextmanager', '_GeneratorContextManager', 'contextlib']):
+            print(f"[AGENT] ❌ Context manager detected: {_type_str}. Disabling checkpointer.", file=sys.stderr)
+            checkpointer = None
+        elif hasattr(checkpointer, '__enter__') and hasattr(checkpointer, '__exit__') and not hasattr(checkpointer, 'get_tuple'):
+            print(f"[AGENT] ❌ Object is a context manager but not a valid saver. Disabling.", file=sys.stderr)
+            checkpointer = None
+        elif hasattr(checkpointer, 'get_tuple') and hasattr(checkpointer, 'put_writes'):
+            print(f"[AGENT] ✅ Valid checkpointer: {_type_name}", file=sys.stderr)
             compile_kwargs["checkpointer"] = checkpointer
         else:
-            # Log warning and ignore invalid checkpointer
-            import sys
-            print(f"[WARN] Invalid checkpointer type: {type(checkpointer).__name__}. Ignoring.", file=sys.stderr)
+            print(f"[AGENT] ⚠️  Unknown checkpointer type: {_type_name}. Attempting to use it anyway.", file=sys.stderr)
+            compile_kwargs["checkpointer"] = checkpointer
     
     return workflow.compile(**compile_kwargs)
