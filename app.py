@@ -6,6 +6,7 @@ ChatGPT-style interface for Indonesian legal document analysis.
 import streamlit as st
 import os, time, re, uuid, logging
 from datetime import datetime
+from typing import Any, cast
 
 # ── Streamlit Cloud: inject secrets into env vars ─────────────────────────────
 try:
@@ -20,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import boto3
+from shared.debug_logger import new_trace_id, log_verbose_event
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.langsmith_config import init_langsmith
 from utils.memory import SemanticMemory
@@ -53,6 +55,13 @@ def _write_log(lines: list[str] | None, query: str = "", latency: float = 0.0):
     _file_logger.info("query=%s | latency=%.1fs", query, latency)
     for line in lines:
         _file_logger.info("  %s", line)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 # ── Persistent memory ────────────────────────────────────────────────────────
 _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
@@ -681,13 +690,17 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                     "logs": [],
                     "narratives": [],
                     "primary_doc_ids": [],
+                    "trace_id": new_trace_id(),
+                    "verbose_debug": _env_bool("GRAPHRAG_VERBOSE_DEBUG", False),
                     "chat_history": list(st.session_state.chat_history),
                     "summary": st.session_state.summary,
                     "user_context": _user_ctx,
                 }
+                _init_state = cast(dict[str, Any], _init_state)
 
                 # Thread config for checkpointer
                 _thread_config = {"configurable": {"thread_id": st.session_state.active_conv_id}}
+                _thread_config = cast(dict[str, Any], _thread_config)
 
                 final_state = {
                     "logs": [], "narratives": [], "primary_doc_ids": [],
@@ -696,11 +709,26 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                 _seen_narr = 0
 
                 for event in agent.stream(
-                    _init_state,
-                    config=_thread_config,
+                    cast(Any, _init_state),
+                    config=cast(Any, _thread_config),
                 ):
                     for _node, _update in event.items():
                         final_state.update(_update)
+                        if _init_state["verbose_debug"]:
+                            log_verbose_event(
+                                route=final_state.get("route", "unknown"),
+                                stage="agent_stream",
+                                event="node_update",
+                                message=f"Node update from {_node}",
+                                trace_id=_init_state["trace_id"],
+                                payload={
+                                    "node": _node,
+                                    "route": final_state.get("route", "unknown"),
+                                    "primary_doc_ids": final_state.get("primary_doc_ids", []),
+                                    "log_tail": (_update.get("logs") or [])[-12:],
+                                    "narrative_tail": (_update.get("narratives") or [])[-6:],
+                                },
+                            )
                         _narrs = _update.get("narratives", [])
                         if len(_narrs) > _seen_narr:
                             for _n in _narrs[_seen_narr:]:

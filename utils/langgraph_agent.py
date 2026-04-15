@@ -73,6 +73,7 @@ import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 import atexit
+from shared.debug_logger import log_verbose_event
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.bm25_index import hybrid_search as _hybrid_search
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -90,6 +91,35 @@ class GraphState(TypedDict):
     chat_history: List[dict]  # [{role: "user"|"assistant", content: str}]
     summary: str  # Condensed older conversation history
     user_context: str  # Injected semantic memory context
+    trace_id: str
+    verbose_debug: bool
+
+
+def _vlog(state: GraphState, *, stage: str, event: str, message: str, payload: dict | None = None) -> None:
+    if not state.get("verbose_debug", False):
+        return
+    log_verbose_event(
+        trace_id=state.get("trace_id", ""),
+        route=state.get("route", "unknown"),
+        stage=stage,
+        event=event,
+        message=message,
+        payload=payload,
+    )
+
+
+def _chunk_preview(chunks: list[dict], limit: int = 3, max_chars: int = 500) -> list[dict]:
+    preview = []
+    for ch in chunks[:limit]:
+        txt = (ch.get("content", "") or "")[:max_chars]
+        preview.append({
+            "id": ch.get("id", ""),
+            "doc_id": ch.get("doc_id", ""),
+            "scope": ch.get("scope", ""),
+            "score": ch.get("score", ch.get("rrf_score", None)),
+            "content": txt,
+        })
+    return preview
 
 def _build_interleaved_context(primary_doc_ids, related_doc_ids, context_docs, max_chunks=30, max_chars=12000):
     result = []
@@ -293,6 +323,27 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
     if rel_context:
         _logs.append(f"[Context] Relationships: {rel_context[:600]}")
     state["logs"] = _logs
+
+    _doc_summary = {}
+    for did, info in context_docs.items():
+        _chunks = info.get("chunks", [])
+        _doc_summary[did] = {
+            "source": info.get("source", "?"),
+            "chunk_count": len(_chunks),
+            "preview": _chunk_preview(_chunks),
+        }
+    _vlog(
+        state,
+        stage="context_assembly",
+        event="context_ready",
+        message="Context assembled for answer generation",
+        payload={
+            "query": state.get("query", ""),
+            "primary_doc_ids": state.get("primary_doc_ids", []),
+            "relationship_context": rel_context,
+            "docs": _doc_summary,
+        },
+    )
     return state
 
 def _build_history_context(state: GraphState) -> str:
@@ -314,6 +365,13 @@ def router_node(state: GraphState) -> GraphState:
     logs = state.get("logs", [])
     narratives = state.get("narratives", [])
     logs.append("[Router Node] Started analysis")
+    _vlog(
+        state,
+        stage="router",
+        event="start",
+        message="Router started",
+        payload={"query": query},
+    )
     
     regex_ids = _extract_doc_ids_from_question(query)
 
@@ -335,6 +393,13 @@ def router_node(state: GraphState) -> GraphState:
         state["route"] = "deep"
         state["primary_doc_ids"] = list(regex_ids)
         logs.append(f"[Router Node] Regex hit ({len(regex_ids)} docs) + analytical query → deep")
+        _vlog(
+            state,
+            stage="router",
+            event="decision",
+            message="Router selected deep via regex analytical match",
+            payload={"regex_doc_ids": list(regex_ids), "route": "deep"},
+        )
         narratives.append(f"Teridentifikasi rujukan terhadap {len(regex_ids)} regulasi ({', '.join(list(regex_ids))}). Pertanyaan bersifat analitis, diperlukan penelusuran mendalam terhadap relasi antar-peraturan.")
         state["logs"] = logs
         state["narratives"] = narratives
@@ -344,6 +409,13 @@ def router_node(state: GraphState) -> GraphState:
         state["route"] = "direct"
         state["primary_doc_ids"] = list(regex_ids)
         logs.append(f"[Router Node] Regex hit: {', '.join(list(regex_ids))}")
+        _vlog(
+            state,
+            stage="router",
+            event="decision",
+            message="Router selected direct via regex",
+            payload={"regex_doc_ids": list(regex_ids), "route": "direct"},
+        )
         narratives.append(f"Teridentifikasi rujukan langsung terhadap regulasi {', '.join(list(regex_ids))}. Melakukan penelusuran ketentuan hukum terkait.")
         state["logs"] = logs
         state["narratives"] = narratives
@@ -384,6 +456,13 @@ Return ONLY valid JSON.
         state["route"] = route if route in ["direct", "semantic", "deep"] else "semantic"
         narratives.append(thought)
         logs.append(f"[Router Node] LLM chose route: {state['route']}")
+        _vlog(
+            state,
+            stage="router",
+            event="decision",
+            message="Router selected route via LLM",
+            payload={"route": state["route"], "raw_response": content},
+        )
     except Exception as e:
         state["route"] = "semantic"
         logs.append(f"[Router Node] Fallback to semantic. Err: {e}")
@@ -405,6 +484,13 @@ def direct_lookup_node(state: GraphState) -> GraphState:
     if not doc_ids:
         state["logs"].append("[Direct Node] No docs found, fallback -> semantic")
         state["route"] = "semantic"
+        _vlog(
+            state,
+            stage="direct_lookup",
+            event="fallback",
+            message="Direct lookup fallback to semantic",
+            payload={"query": query},
+        )
         return state
 
     # Graph expansion: follow CITES/HIGHER edges to discover related docs
@@ -425,6 +511,13 @@ def direct_lookup_node(state: GraphState) -> GraphState:
 
     state["primary_doc_ids"] = doc_ids
     state["logs"].append(f"[Direct Node] Dokumen ditemukan: {', '.join(doc_ids[:8])}")
+    _vlog(
+        state,
+        stage="direct_lookup",
+        event="retrieved_docs",
+        message="Direct lookup selected documents",
+        payload={"doc_ids": doc_ids},
+    )
     state["narratives"].append("Dokumen regulasi berhasil ditemukan. Melakukan analisis terhadap ketentuan pasal dan ayat yang berlaku.")
     return _assemble_context_for_state(state)
 
@@ -651,6 +744,18 @@ def semantic_search_node(state: GraphState) -> GraphState:
         state["route"] = "deep"
         return state
 
+    _vlog(
+        state,
+        stage="semantic_search",
+        event="initial_retrieval",
+        message="Semantic hybrid retrieval complete",
+        payload={
+            "query": query,
+            "doc_ids": doc_ids,
+            "hybrid_hits_preview": _chunk_preview(raw, limit=8, max_chars=300),
+        },
+    )
+
     # Lampiran-based discovery: find docs whose attachment content matches query
     _q_words = re.findall(r'[a-zA-Z\u00C0-\u024F]+', query.lower())
     _stopwords = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "dalam",
@@ -774,6 +879,16 @@ def semantic_search_node(state: GraphState) -> GraphState:
     state["logs"].append(f"[Semantic Node] Reranking {len(all_candidates)} chunks via LLM...")
     reranked = _rerank_chunks_llm(query, all_candidates)
     state["logs"].append(f"[Semantic Node] {len(reranked)} chunks passed rerank filter (score >= 4)")
+    _vlog(
+        state,
+        stage="semantic_search",
+        event="rerank_done",
+        message="Semantic rerank finished",
+        payload={
+            "reranked_count": len(reranked),
+            "reranked_preview": _chunk_preview(reranked, limit=10, max_chars=300),
+        },
+    )
 
     # Build final context from reranked chunks
     llm_chunks = []
@@ -876,7 +991,8 @@ def deep_research_node(state: GraphState) -> GraphState:
     state["logs"].append("[Deep Node] Memulai penelusuran mendalam pada Graph dan VDB")
     state["narratives"].append("Diperlukan analisis hukum yang lebih komprehensif. Melakukan penelusuran mendalam terhadap regulasi terkait, termasuk riwayat perubahan dan relasi antar-peraturan.")
     query = state["query"]
-    expanded = llm_stance.expand_query(query)
+    _trace_id = state.get("trace_id", "") if state.get("verbose_debug", False) else ""
+    expanded = llm_stance.expand_query(query, _trace_id=_trace_id, _route="deep")
     
     raw = []
     seen = set()
@@ -893,6 +1009,19 @@ def deep_research_node(state: GraphState) -> GraphState:
     vdb_docs = _get_unique_doc_ids(raw, 10)
     merged_docs = list(vdb_docs)
     added = set(merged_docs)
+    _vlog(
+        state,
+        stage="deep_research",
+        event="hybrid_multiquery",
+        message="Deep research multi-query retrieval complete",
+        payload={
+            "query": query,
+            "expanded_terms": expanded,
+            "raw_hits_count": len(raw),
+            "vdb_doc_ids": vdb_docs,
+            "raw_hits_preview": _chunk_preview(raw, limit=10, max_chars=300),
+        },
+    )
     
     if neo4j_client.test_connection():
         all_docs = neo4j_client.get_all_documents()
@@ -980,7 +1109,7 @@ def deep_research_node(state: GraphState) -> GraphState:
             except Exception: pass
         doc_summaries[did] = summary[:500]
         
-    ranked = llm_stance.rerank_documents(query, doc_summaries)
+    ranked = llm_stance.rerank_documents(query, doc_summaries, _trace_id=_trace_id, _route="deep")
     top_docs = [did for did, sc in ranked if sc >= 3.0][:5]
     if not top_docs: top_docs = merged_docs[:5]
 
@@ -996,6 +1125,18 @@ def deep_research_node(state: GraphState) -> GraphState:
             
     state["primary_doc_ids"] = cur_doc_ids
     state["logs"].append(f"[Deep Node] Reranked dokumen: {', '.join(cur_doc_ids[:5])}")
+    _vlog(
+        state,
+        stage="deep_research",
+        event="doc_selection",
+        message="Deep research selected final documents",
+        payload={
+            "ranked": ranked,
+            "top_docs": top_docs,
+            "final_primary_doc_ids": cur_doc_ids,
+            "doc_summaries": doc_summaries,
+        },
+    )
     doc_list = '; '.join(cur_doc_ids)
     state["narratives"].append(f"Ditemukan {len(cur_doc_ids)} dokumen: {doc_list}. Menyusun kesimpulan hukum.")
     return _assemble_context_for_state(state, raw_vdb_hits=raw)
@@ -1015,8 +1156,23 @@ def generate_answer_node(state: GraphState) -> GraphState:
         chat_history=state.get("chat_history", []),
         summary=state.get("summary", ""),
         user_context=state.get("user_context", ""),
+        _trace_id=state.get("trace_id", "") if state.get("verbose_debug", False) else "",
+        _route=state.get("route", ""),
+        _verbose_debug=state.get("verbose_debug", False),
     )
     state["answer"] = ans
+    _vlog(
+        state,
+        stage="generate_answer",
+        event="model_output",
+        message="Answer model completed",
+        payload={
+            "route": state.get("route", "unknown"),
+            "context_chunk_count": len(chunks),
+            "context_preview": _chunk_preview(chunks, limit=8, max_chars=350),
+            "answer_preview": (ans or "")[:1500],
+        },
+    )
     # Append current exchange to chat_history
     history = list(state.get("chat_history", []))
     history.append({"role": "user", "content": state["query"]})

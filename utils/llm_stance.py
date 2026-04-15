@@ -553,7 +553,10 @@ def ask_about_documents(query: str, context_chunks: list[dict],
                        relationship_context: str = "",
                        chat_history: list[dict] | None = None,
                        summary: str = "",
-                       user_context: str = "") -> str:
+                       user_context: str = "",
+                       _trace_id: str = "",
+                       _route: str = "",
+                       _verbose_debug: bool = False) -> str:
     """
     RAG-style question answering: given a user query and relevant context chunks,
     generate an answer grounded in the legal documents.
@@ -681,6 +684,34 @@ Instruksi:
 5. Jika ada relasi antar-regulasi di atas, GUNAKAN informasi tersebut dalam jawaban.
 6. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
 
+    if _verbose_debug and _trace_id:
+        from shared.debug_logger import log_event as _dlog
+        _dlog(
+            trace_id=_trace_id,
+            route=_route or "answer",
+            stage="ask_about_documents",
+            event="prompt_input",
+            message="ask_about_documents prompt input",
+            payload={
+                "query": query,
+                "context_chunk_count": len(context_chunks),
+                "context_preview": [
+                    {
+                        "doc_id": ch.get("doc_id", ""),
+                        "scope": ch.get("scope", ""),
+                        "content": (ch.get("content", "") or "")[:500],
+                    }
+                    for ch in context_chunks[:10]
+                ],
+                "relationship_context": relationship_context,
+                "summary": summary,
+                "chat_history_tail": (chat_history or [])[-6:],
+                "user_context": user_context,
+                "system_prompt": system_prompt,
+                "augmented_user_prompt": user_prompt,
+            },
+        )
+
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
@@ -691,8 +722,32 @@ Instruksi:
             max_tokens=2000,
             temperature=0.2,
         )
-        return response.choices[0].message.content
+        out = response.choices[0].message.content
+        if _verbose_debug and _trace_id:
+            from shared.debug_logger import log_event as _dlog
+            _dlog(
+                trace_id=_trace_id,
+                route=_route or "answer",
+                stage="ask_about_documents",
+                event="prompt_output",
+                message="ask_about_documents prompt output",
+                payload={
+                    "model": LLM_MODEL,
+                    "response_preview": (out or "")[:3000],
+                },
+            )
+        return out
     except Exception as e:
+        if _verbose_debug and _trace_id:
+            from shared.debug_logger import log_event as _dlog
+            _dlog(
+                trace_id=_trace_id,
+                route=_route or "answer",
+                stage="ask_about_documents",
+                event="error",
+                message="ask_about_documents error",
+                payload={"error": str(e)},
+            )
         return f"Error generating answer: {str(e)}"
 
 
