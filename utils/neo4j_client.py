@@ -98,11 +98,17 @@ def get_document_detail(doc_id: str) -> dict:
     RETURN dk {.*} AS diktum
     ORDER BY dk.name
     """
+    # Fetch lampiran (attachments)
+    lampiran_query = """
+    MATCH (d:Document {doc_id: $doc_id})-[:HAS_LAMPIRAN]->(l:Lampiran)
+    RETURN l {.*} AS lampiran
+    """
     with driver.session() as session:
         doc_result = session.run(doc_query, doc_id=doc_id).single()
         pasals = [r["pasal"] for r in session.run(pasal_query, doc_id=doc_id)]
         ayats = [r["ayat"] for r in session.run(ayat_query, doc_id=doc_id)]
         diktums = [r["diktum"] for r in session.run(diktum_query, doc_id=doc_id)]
+        lampirans = [r["lampiran"] for r in session.run(lampiran_query, doc_id=doc_id)]
 
         if doc_result:
             return {
@@ -110,6 +116,7 @@ def get_document_detail(doc_id: str) -> dict:
                 "pasals": pasals,
                 "ayats": ayats,
                 "diktums": diktums,
+                "lampirans": lampirans,
             }
         return {}
 
@@ -330,6 +337,36 @@ def get_related_documents(doc_id: str, limit: int = 3) -> list[dict]:
     with driver.session() as session:
         result = session.run(query, doc_id=doc_id, limit=limit)
         return [record["doc"] for record in result]
+
+
+def search_lampiran_content(keywords: list[str], max_docs: int = 5) -> list[str]:
+    """Search Lampiran nodes by keyword matching and return doc_ids ranked by relevance.
+
+    This enables discovery of documents whose primary content lives in
+    Lampiran (attachments) rather than in Pasal/Ayat text.
+    """
+    if not keywords:
+        return []
+    driver = get_driver()
+    # Build a WHERE clause that counts keyword hits
+    conditions = " + ".join(
+        [f"CASE WHEN toLower(l.content) CONTAINS toLower($kw{i}) THEN 1 ELSE 0 END"
+         for i in range(len(keywords))]
+    )
+    query = f"""
+    MATCH (d:Document)-[:HAS_LAMPIRAN]->(l:Lampiran)
+    WHERE l.content IS NOT NULL AND size(l.content) > 30
+    WITH d.doc_id AS doc_id, l, ({conditions}) AS hits
+    WHERE hits > 0
+    RETURN doc_id, sum(hits) AS total_hits, count(l) AS matching_lampiran
+    ORDER BY total_hits DESC, matching_lampiran DESC
+    LIMIT $max_docs
+    """
+    params = {f"kw{i}": kw for i, kw in enumerate(keywords)}
+    params["max_docs"] = max_docs
+    with driver.session() as session:
+        result = session.run(query, **params)
+        return [r["doc_id"] for r in result]
 
 
 @_cache_data(ttl=3600)

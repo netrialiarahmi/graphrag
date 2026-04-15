@@ -253,6 +253,19 @@ def _assemble_context_for_state(state: GraphState, raw_vdb_hits=None) -> GraphSt
                         neo_chunks.append({"id": nid, "doc_id": did, "content": content,
                                            "scope": "neo4j-pasal", "_kscore": kscore})
                         seen_chunk_ids.add(nid)
+                # Include lampiran (attachment) content
+                for lmp in detail.get("lampirans", []):
+                    content = lmp.get("content", "")
+                    lid = lmp.get("lampiran_id") or lmp.get("block_id") or lmp.get("uuid", "")
+                    nid = f"neo-{did}-lamp-{lid}"
+                    if content and len(content) > 20 and nid not in seen_chunk_ids:
+                        title = lmp.get("title", "")
+                        if title:
+                            content = f"[Lampiran: {title}]\n{content}"
+                        kscore = _keyword_score(content, _keywords)
+                        neo_chunks.append({"id": nid, "doc_id": did, "content": content,
+                                           "scope": "neo4j-lampiran", "_kscore": kscore})
+                        seen_chunk_ids.add(nid)
                 # Sort Neo4j chunks by keyword relevance (desc) so topic-relevant
                 # pasals surface first in the context window
                 neo_chunks.sort(key=lambda c: c["_kscore"], reverse=True)
@@ -638,7 +651,24 @@ def semantic_search_node(state: GraphState) -> GraphState:
         state["route"] = "deep"
         return state
 
-    state["logs"].append(f"[Semantic Node] Dokumen ditemukan: {', '.join(doc_ids[:5])}. Reranking chunks...")
+    # Lampiran-based discovery: find docs whose attachment content matches query
+    _q_words = re.findall(r'[a-zA-Z\u00C0-\u024F]+', query.lower())
+    _stopwords = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "dalam",
+                  "ini", "itu", "adalah", "pada", "atau", "bahwa", "sebagai",
+                  "antara", "bagaimana", "apa", "apakah", "tidak", "ada",
+                  "tentang", "hal", "tahun", "nomor", "pasal"}
+    _kw = [w for w in _q_words if w not in _stopwords and len(w) > 2]
+    if _kw and neo4j_client.test_connection():
+        try:
+            lamp_docs = neo4j_client.search_lampiran_content(_kw, max_docs=3)
+            for d in lamp_docs:
+                if d not in doc_ids:
+                    doc_ids.append(d)
+                    state["logs"].append(f"[Semantic Node] Lampiran discovery: {d}")
+        except Exception:
+            pass
+
+    state["logs"].append(f"[Semantic Node] Dokumen ditemukan: {', '.join(doc_ids[:8])}. Reranking chunks...")
 
     # Step 3: Gather chunks per doc
     context_docs = {}
@@ -658,7 +688,7 @@ def semantic_search_node(state: GraphState) -> GraphState:
             pass
         context_docs[did] = {"source": "hybrid", "chunks": doc_chunks}
 
-    # Neo4j enrichment
+    # Neo4j enrichment (pasals, ayats, lampiran)
     if neo4j_client.test_connection():
         for did in doc_ids:
             try:
@@ -671,6 +701,18 @@ def semantic_search_node(state: GraphState) -> GraphState:
                         context_docs.setdefault(did, {"source": "hybrid", "chunks": []})[
                             "chunks"
                         ].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-pasal"})
+                        seen_chunk_ids.add(nid)
+                for lmp in detail.get("lampirans", []):
+                    content = lmp.get("content", "")
+                    lid = lmp.get("lampiran_id") or lmp.get("block_id") or lmp.get("uuid", "")
+                    nid = f"neo-{did}-lamp-{lid}"
+                    if content and len(content) > 20 and nid not in seen_chunk_ids:
+                        title = lmp.get("title", "")
+                        if title:
+                            content = f"[Lampiran: {title}]\n{content}"
+                        context_docs.setdefault(did, {"source": "hybrid", "chunks": []})[
+                            "chunks"
+                        ].append({"id": nid, "doc_id": did, "content": content, "scope": "neo4j-lampiran"})
                         seen_chunk_ids.add(nid)
             except Exception:
                 pass
@@ -877,6 +919,27 @@ def deep_research_node(state: GraphState) -> GraphState:
                 merged_docs.append(sib)
                 added.add(sib)
 
+    # Lampiran-based discovery: find docs whose attachment content matches query keywords
+    _lamp_discovered = []  # track docs found via lampiran for priority
+    _deep_kw = []
+    if neo4j_client.test_connection():
+        try:
+            _q_words = re.findall(r'[a-zA-Z\u00C0-\u024F]+', query.lower())
+            _sw = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "dalam",
+                   "ini", "itu", "adalah", "pada", "atau", "bahwa", "sebagai",
+                   "antara", "bagaimana", "apa", "apakah", "tidak", "ada",
+                   "tentang", "hal", "tahun", "nomor", "pasal"}
+            _deep_kw = [w for w in _q_words if w not in _sw and len(w) > 2]
+            lamp_docs = neo4j_client.search_lampiran_content(_deep_kw, max_docs=5)
+            _lamp_discovered = list(lamp_docs)
+            for d in lamp_docs:
+                if d not in added:
+                    merged_docs.append(d)
+                    added.add(d)
+                    state["logs"].append(f"[Deep Node] Lampiran discovery: {d}")
+        except Exception:
+            pass
+
     doc_summaries = {}
     for did in merged_docs[:15]:
         summary = ""
@@ -885,22 +948,47 @@ def deep_research_node(state: GraphState) -> GraphState:
         if not summary and neo4j_client.test_connection():
             try:
                 dtl = neo4j_client.get_document_detail(did)
-                # Check pasals first, then ayats (pasals often have NULL content)
-                for p in dtl.get("pasals", []):
-                    if p.get("content") and len(p["content"]) > 30:
-                        summary = p["content"]
-                        break
+                # For lampiran-discovered docs, prefer best keyword-matching
+                # lampiran content so the reranker sees relevant material
+                if did in _lamp_discovered and _deep_kw and dtl.get("lampirans"):
+                    best_score = -1
+                    for lmp in dtl.get("lampirans", []):
+                        lc = (lmp.get("content") or "").lower()
+                        if len(lc) < 30:
+                            continue
+                        sc = sum(1 for kw in _deep_kw if kw in lc)
+                        if sc > best_score:
+                            best_score = sc
+                            ttl = lmp.get("title", "")
+                            summary = (f"[Lampiran: {ttl}]\n" if ttl else "") + lmp.get("content", "")
+                # Fallback: pasals, ayats, then any lampiran
+                if not summary:
+                    for p in dtl.get("pasals", []):
+                        if p.get("content") and len(p["content"]) > 30:
+                            summary = p["content"]
+                            break
                 if not summary:
                     for a in dtl.get("ayats", []):
                         if a.get("content") and len(a["content"]) > 30:
                             summary = a["content"]
                             break
+                if not summary:
+                    for lmp in dtl.get("lampirans", []):
+                        if lmp.get("content") and len(lmp["content"]) > 30:
+                            summary = lmp["content"]
+                            break
             except Exception: pass
-        doc_summaries[did] = summary[:400]
+        doc_summaries[did] = summary[:500]
         
     ranked = llm_stance.rerank_documents(query, doc_summaries)
     top_docs = [did for did, sc in ranked if sc >= 3.0][:5]
     if not top_docs: top_docs = merged_docs[:5]
+
+    # Guarantee lampiran-discovered docs survive reranking
+    for d in _lamp_discovered:
+        if d not in top_docs:
+            top_docs.append(d)
+            state["logs"].append(f"[Deep Node] Lampiran-priority doc added: {d}")
         
     cur_doc_ids = state.get("primary_doc_ids", [])
     for d in top_docs:
