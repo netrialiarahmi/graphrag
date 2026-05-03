@@ -63,6 +63,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+
+SHOW_RELATION_TIMELINE = _env_bool("GRAPHRAG_SHOW_RELATION_TIMELINE", False)
+
 # ── Persistent memory ────────────────────────────────────────────────────────
 _MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
@@ -831,14 +834,97 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
                         reasoning=_conflict_result.get("reason", ""),
                     )
 
-                    if os.path.isfile(VISUALIZE_CSV):
+                    if SHOW_RELATION_TIMELINE and os.path.isfile(VISUALIZE_CSV):
                         _viz = build_timeline_html(VISUALIZE_CSV)
                         if _viz:
                             _html, _height = _viz
                             import streamlit.components.v1 as components
                             components.html(_html, height=_height, scrolling=True)
-            except Exception:
-                pass
+
+                    # --- D3 network visualization (from VISUALIZE_CSV only, matching timeline) ---
+                    try:
+                        if os.path.isfile(VISUALIZE_CSV):
+                            import csv as _csv
+
+                            # Read VISUALIZE_CSV and build nodes+edges directly from it
+                            doc_set = set()
+                            edges = []
+
+                            with open(VISUALIZE_CSV, encoding="utf-8-sig") as _fh:
+                                rdr = _csv.DictReader(_fh)
+                                for r in rdr:
+                                    a = (r.get("doc_1") or r.get("doc1") or "").strip()
+                                    b = (r.get("doc_2") or r.get("doc2") or "").strip()
+                                    rel = (r.get("relation_type") or r.get("relation") or "").strip().lower()
+                                    if not a or not b:
+                                        continue
+
+                                    doc_set.add(a)
+                                    doc_set.add(b)
+
+                                    # Map relation type to color
+                                    if "entail" in rel:
+                                        color = "#059669"
+                                    elif "conflict" in rel or "contrad" in rel or "conf" in rel:
+                                        color = "#dc2626"
+                                    else:
+                                        color = "#94a3b8"
+
+                                    edges.append({
+                                        "source": a,
+                                        "target": b,
+                                        "type": rel,
+                                        "raw": r.get("reasoning", ""),
+                                        "color": color,
+                                    })
+
+                            # Fetch document details from Neo4j for all nodes in VISUALIZE_CSV
+                            nodes = []
+                            deg = {}
+                            for did in doc_set:
+                                deg[did] = sum(1 for e in edges if e["source"] == did or e["target"] == did)
+
+                                try:
+                                    doc_detail = neo4j_client.get_document_detail(did)
+                                    if doc_detail:
+                                        nodes.append({
+                                            "doc_id": did,
+                                            "judul": doc_detail.get("judul", ""),
+                                            "jenis": doc_detail.get("jenis", ""),
+                                            "nomor": doc_detail.get("nomor", ""),
+                                            "tahun": doc_detail.get("tahun", ""),
+                                            "pembentuk": doc_detail.get("pembentuk", ""),
+                                            "degree": deg.get(did, 0),
+                                        })
+                                    else:
+                                        nodes.append({
+                                            "doc_id": did,
+                                            "judul": "",
+                                            "jenis": "",
+                                            "nomor": "",
+                                            "tahun": "",
+                                            "pembentuk": "",
+                                            "degree": deg.get(did, 0),
+                                        })
+                                except Exception:
+                                    nodes.append({
+                                        "doc_id": did,
+                                        "judul": "",
+                                        "jenis": "",
+                                        "nomor": "",
+                                        "tahun": "",
+                                        "pembentuk": "",
+                                        "degree": deg.get(did, 0),
+                                    })
+
+                            if nodes and edges:
+                                root = _paired_ids[0] if _paired_ids else nodes[0]["doc_id"]
+                                graph_payload = {"nodes": nodes, "edges": edges, "meta": {"root_doc_id": root}}
+                                graph_viz.render_d3_network(graph_payload, selected_doc_id=root)
+                    except Exception as e:
+                        st.caption(f"Visualisasi D3 tidak dapat dimuat: {e}")
+            except Exception as e:
+                st.caption(f"Visualisasi relasi tidak dapat dimuat: {e}")
 
             # Log to semantic memory
             try:

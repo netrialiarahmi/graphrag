@@ -21,6 +21,9 @@ Horizontal positioning: newer regulations (higher year) appear further right.
 """
 
 import re
+import json
+import uuid
+import streamlit.components.v1 as components
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # -- Navy Color Palette --------------------------------------------------------
@@ -473,3 +476,180 @@ def _node_tooltip(node: dict) -> str:
             val_str = val_str[:100] + "..."
         parts.append(f"{k}: {val_str}")
     return "\n".join(parts)
+
+
+# -------------------- D3 embedded HTML renderer (from lexport) -----------------
+RELATIONSHIP_COLORS = {
+        "CITES": "#22c55e",
+        "AMENDS": "#ef4444",
+        "REVOKS": "#f59e0b",
+}
+
+
+def build_d3_html(graph_payload: dict, selected_doc_id: str | None, label_mode: str, charge: int, link_distance: int) -> str:
+        """Build the D3 HTML/JS string for embedding via Streamlit components.
+
+        Expects `graph_payload` shaped like: {"nodes": [...], "edges": [...], "meta": {...}}
+        Nodes must include `doc_id`, `judul`, `jenis`, `nomor`, `tahun`, `degree`.
+        """
+        nodes_json = json.dumps(graph_payload.get("nodes", []), ensure_ascii=False)
+        edges_json = json.dumps(graph_payload.get("edges", []), ensure_ascii=False)
+        edge_colors_json = json.dumps(RELATIONSHIP_COLORS)
+        label_mode_json = json.dumps(label_mode)
+        selected_doc_id_json = json.dumps(selected_doc_id or "")
+        component_suffix = uuid.uuid4().hex
+        root_id = f"graph-root-{component_suffix}"
+        fit_btn_id = f"fit-btn-{component_suffix}"
+        svg_id = f"graph-svg-{component_suffix}"
+        root_id_json = json.dumps(root_id)
+        fit_btn_id_json = json.dumps(fit_btn_id)
+        svg_id_json = json.dumps(svg_id)
+
+        return f"""
+        <div id="{root_id}" style="width:100%;height:440px;background:#06111f;border:1px solid rgba(148,163,184,0.18);border-radius:18px;overflow:hidden;position:relative;">
+            <div id="graph-toolbar" style="position:absolute;left:16px;top:16px;z-index:5;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <button id="{fit_btn_id}" style="background:#1d4ed8;color:white;border:none;border-radius:999px;padding:8px 14px;font:600 12px sans-serif;cursor:pointer;">Fit Graph</button>
+                <span style="color:#94a3b8;font:600 12px sans-serif;">Drag nodes or zoom to navigate.</span>
+            </div>
+            <svg id="{svg_id}" width="100%" height="100%"></svg>
+        </div>
+        <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+        <script>
+        (function() {{
+            const rootElement = document.getElementById({root_id_json});
+            const fitButton = document.getElementById({fit_btn_id_json});
+            if (!rootElement || !fitButton || typeof d3 === "undefined") {{
+                if (rootElement) {{
+                    rootElement.innerHTML = '<div style="padding:24px;color:#cbd5e1;font:600 13px sans-serif;">D3 visualization could not be initialized. Please check browser access to the D3 CDN.</div>';
+                }}
+                return;
+            }}
+            const nodes = {nodes_json}.map(node => ({{ ...node }}));
+            const links = {edges_json}.map((edge, index) => ({{ ...edge, id: `edge-${{index}}` }}));
+            const edgeColors = {edge_colors_json};
+            const labelMode = {label_mode_json};
+            const selectedDocId = {selected_doc_id_json};
+            const width = rootElement.clientWidth;
+            const height = rootElement.clientHeight;
+
+            const svg = d3.select("#" + {svg_id_json});
+            const root = svg.append("g");
+            const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (event) => {{ root.attr("transform", event.transform); }});
+            svg.call(zoom);
+
+            const NODE_RADIUS = 12;
+            const jenisDomain = [...new Set(nodes.map(node => node.jenis || "Unknown"))].sort(d3.ascending);
+            const color = d3.scaleOrdinal(jenisDomain, d3.schemeTableau10.concat(d3.schemeSet3));
+
+            const simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links).id(d => d.doc_id).distance({link_distance}).strength(0.2))
+                .force("charge", d3.forceManyBody().strength({charge}))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("collision", d3.forceCollide().radius(NODE_RADIUS + 6));
+
+            // Draw links
+            const link = root.append("g")
+                .attr("stroke-linecap", "round")
+                .selectAll("line")
+                .data(links)
+                .join("line")
+                .attr("stroke", d => d.color || edgeColors[d.type] || "#94a3b8")
+                .attr("stroke-width", 2)
+                .attr("opacity", 0.95);
+
+            // Draw nodes
+            const node = root.append("g")
+                .selectAll("g")
+                .data(nodes)
+                .join("g")
+                .call(d3.drag()
+                    .on("start", (event, d) => {{ if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }})
+                    .on("drag", (event, d) => {{ d.fx = event.x; d.fy = event.y; }})
+                    .on("end", (event, d) => {{ if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }}));
+
+            node.append("circle")
+                .attr("r", NODE_RADIUS)
+                .attr("fill", d => color(d.jenis || "Unknown"))
+                .attr("stroke", d => d.doc_id === selectedDocId ? "#facc15" : "#ffffff")
+                .attr("stroke-width", d => d.doc_id === selectedDocId ? 4 : 2);
+
+            node.append("text")
+                .text(d => labelMode === "Title" && d.judul ? d.judul : d.doc_id)
+                .attr("fill", "#e5eefb")
+                .attr("font-family", "Inter, Segoe UI, sans-serif")
+                .attr("font-size", 11)
+                .attr("text-anchor", "middle")
+                .attr("dy", -(NODE_RADIUS + 10));
+
+            simulation.on("tick", () => {{
+                link
+                    .attr("x1", d => (d.source.x))
+                    .attr("y1", d => (d.source.y))
+                    .attr("x2", d => (d.target.x))
+                    .attr("y2", d => (d.target.y));
+
+                node.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
+            }});
+
+            function fitGraph() {{
+                const bounds = root.node().getBBox();
+                if (!bounds.width || !bounds.height) return;
+                const fullWidth = width, fullHeight = height;
+                const midX = bounds.x + bounds.width / 2;
+                const midY = bounds.y + bounds.height / 2;
+                const scale = Math.max(0.1, Math.min(2.5, 0.9 / Math.max(bounds.width / fullWidth, bounds.height / fullHeight)));
+                const translate = [fullWidth / 2 - scale * midX, fullHeight / 2 - scale * midY];
+                svg.transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
+            }}
+
+            function fitGraphWhenReady(attemptsLeft = 12) {{
+                const bounds = root.node().getBBox();
+                if (bounds.width && bounds.height) {{
+                    fitGraph();
+                    return;
+                }}
+                if (attemptsLeft > 0) {{
+                    setTimeout(() => fitGraphWhenReady(attemptsLeft - 1), 150);
+                }}
+            }}
+
+            fitButton.addEventListener("click", fitGraph);
+            simulation.on("end", fitGraph);
+            setTimeout(fitGraphWhenReady, 250);
+            setTimeout(fitGraph, 1200);
+        }})();
+        </script>
+        """
+
+
+def render_d3_network(graph_payload: dict, selected_doc_id: str | None = None, label_mode: str = "Doc ID", charge: int = -320, link_distance: int = 90, height: int = 460):
+        """Render the D3 graph in Streamlit using components.html."""
+        html = build_d3_html(graph_payload, selected_doc_id, label_mode, charge, link_distance)
+        components.html(html, height=height, scrolling=False)
+
+
+def merge_graph_payload(existing: dict, new: dict) -> dict:
+        """Merge two graph payloads (nodes/edges) without duplicates.
+
+        Keys: nodes identified by `doc_id`; edges identified by (source,target,type,raw).
+        Returns a new merged payload.
+        """
+        existing_nodes = {n["doc_id"]: n for n in existing.get("nodes", [])}
+        for n in new.get("nodes", []):
+                existing_nodes.setdefault(n["doc_id"], n)
+
+        seen_edges = set()
+        merged_edges = []
+        for e in existing.get("edges", []) + new.get("edges", []):
+                key = (e.get("source"), e.get("target"), e.get("type"), json.dumps(e.get("raw", ""), ensure_ascii=False))
+                if key in seen_edges:
+                        continue
+                seen_edges.add(key)
+                merged_edges.append(e)
+
+        merged = {
+                "nodes": list(existing_nodes.values()),
+                "edges": merged_edges,
+                "meta": new.get("meta") or existing.get("meta") or {},
+        }
+        return merged
