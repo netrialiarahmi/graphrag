@@ -1,6 +1,59 @@
-# GraphRAG -- Legal Document Retrieval Benchmark
+# GraphRAG — Legal Question Answering with Graph Augmentation
 
-A benchmark framework for evaluating information retrieval performance on Indonesian legal documents, comparing Vector Database (VDB) retrieval against Graph-augmented Retrieval (GraphRAG).
+A modular backend + frontend system for answering Indonesian legal questions using **graph-augmented retrieval** (GraphRAG) combining dense semantic search (Pinecone) with knowledge graph expansion (Neo4j) and LLM reasoning.
+
+**Core Stack:** FastAPI (backend) + Streamlit (frontend) + Neo4j (graph DB) + Pinecone (vector DB) + LangGraph (agentic pipeline) + OpenRouter (LLM)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- Docker (optional)
+- `.env` file with API keys (see [Environment Setup](#environment-setup))
+
+### Local Development (5 minutes)
+
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Start FastAPI backend** (Terminal 1):
+   ```bash
+   uvicorn app.api.main:app --reload
+   ```
+   Backend runs on `http://localhost:8000` with API docs at `http://localhost:8000/docs`
+
+3. **Start Streamlit frontend** (Terminal 2):
+   ```bash
+   streamlit run app.py
+   ```
+   Frontend runs on `http://localhost:8501`
+
+4. **Test the system:**
+   - Open browser to `http://localhost:8501`
+   - Ask a legal question in Indonesian (e.g., "Apa itu UU No. 11 Tahun 2020?")
+   - View answer + D3 document graph visualization
+
+### Docker Setup
+
+1. **Build and run backend container:**
+   ```bash
+   docker build -t graphrag-backend .
+   docker run -p 8000:8000 \
+     --env-file .env \
+     -v $(pwd)/data:/app/data \
+     -v $(pwd)/output:/app/output \
+     graphrag-backend
+   ```
+
+2. **Run Streamlit frontend locally** pointing to container backend:
+   ```bash
+   STREAMLIT_FASTAPI_URL=http://localhost:8000 streamlit run app.py
+   ```
 
 ---
 
@@ -8,104 +61,416 @@ A benchmark framework for evaluating information retrieval performance on Indone
 
 ```
 graphrag/
-  app.py                     # Streamlit web application (read-only result viewer)
-  run_benchmark_v3.py        # Retrieval benchmark CLI script
-  run_kausalitas.py          # Kausalitas (legal consistency) analysis CLI script
-  requirements.txt           # Python dependencies
-  benchmark/                 # Ground-truth XLSX datasets
-    QA 100 (test-all-sector).xlsx
-    govnetic_qa_complete_50 (business).xlsx
-  output/
-    retrieval/
-      detailed retrieval/    # Per-question retrieval results (CSV)
-      metrics/               # Aggregate metric summaries (CSV)
-    kausalitas/              # Kausalitas analysis results
-  utils/
-    benchmark_helpers.py     # Document parsing, alias matching, scoring helpers
-    neo4j_client.py          # Neo4j Aura graph database client
-    pinecone_client.py       # Pinecone vector database client
-    llm_stance.py            # Embedding and LLM inference utilities
-    graph_viz.py             # Graph visualization helpers
+├── app/                          # Backend application (FastAPI)
+│   ├── api/
+│   │   └── main.py              # FastAPI app, endpoints (/health, /query), lifespan
+│   ├── services/
+│   │   ├── agent.py             # AgentService: LangGraph pipeline wrapper
+│   │   └── graph.py             # GraphService: D3 visualization builder
+│   └── schemas.py               # Pydantic models (QueryRequest, QueryResponse, D3Payload)
+│
+├── utils/                        # Shared utilities
+│   ├── fastapi_client.py        # HTTP client for Streamlit to call backend
+│   ├── helpers.py               # Environment parsing, logging, checkpointer setup
+│   ├── memory.py                # SemanticMemory: SQLite query logging + user context
+│   ├── debug_logger.py          # Structured JSON-lines debug logging
+│   ├── langgraph_agent.py       # LangGraph agent definition (6-node pipeline)
+│   ├── neo4j_client.py          # Neo4j graph DB connector (cached, lazy-loaded)
+│   ├── pinecone_client.py       # Pinecone vector DB connector (semantic search)
+│   ├── bm25_index.py            # BM25 keyword search (hybrid dense+BM25 fusion)
+│   ├── graph_viz.py             # Graph visualization (streamlit-agraph + D3.js)
+│   ├── conflict_logger.py       # Conflict detection + CSV logging
+│   └── llm_stance.py            # LLM embeddings and inference utilities
+│
+├── data/                         # Runtime data (git-ignored)
+│   ├── db/                      # SQLite databases
+│   │   ├── checkpointer.db      # LangGraph conversation state
+│   │   ├── graphrag_memory.db   # Query analytics + user preferences
+│   │   └── .gitkeep
+│   └── cache/
+│       ├── bm25_corpus.json     # BM25 index (auto-downloaded from Pinecone)
+│       └── .gitkeep
+│
+├── output/                       # Generated files (git-ignored)
+│   ├── logs/
+│   │   └── debug.log            # Structured query logs
+│   ├── conflict/
+│   │   ├── visualize_potential_conflict.csv
+│   │   └── potential_conflict_set.csv
+│   └── retrieval/               # (Legacy benchmark results)
+│
+├── docs/                         # Documentation
+│   ├── DOCUMENTATION.md         # Complete API/service reference (all functions)
+│   ├── API.md                   # REST API endpoint examples
+│   └── SEARCH_PIPELINE.md
+│
+├── app.py                        # Streamlit frontend (UI + HTTP client)
+├── Dockerfile                    # FastAPI backend container image
+├── docker-compose.yml            # (Optional) Full stack orchestration
+├── requirements.txt              # Python dependencies
+├── .env.example                  # Environment variables template
+└── .gitignore
 ```
 
 ---
 
-## Benchmark v3 -- Methodology
+## Architecture
 
-### Overview
+```
+┌────────────────────────────────────────────────────────────┐
+│           Streamlit UI (app.py)                           │
+│   - Chat interface                                         │
+│   - D3 graph visualization                                │
+│   - Document browser                                      │
+│   - Calls FastAPI backend via HTTP                        │
+└─────────────────┬──────────────────────────────────────────┘
+                  │ POST /query
+                  │ {"query": "...", "options": {...}}
+┌─────────────────▼──────────────────────────────────────────┐
+│      FastAPI Backend (app/api/main.py)                    │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  AgentService (app/services/agent.py)               │ │
+│  │  ├─ LangGraph 6-node pipeline                       │ │
+│  │  │  ├─ [Router] Classify query type                 │ │
+│  │  │  ├─ [Direct Lookup] Known document queries       │ │
+│  │  │  ├─ [Semantic Search] Dense retrieval + BM25     │ │
+│  │  │  ├─ [Deep Research] Graph expansion (Neo4j)      │ │
+│  │  │  ├─ [Answer Generator] LLM synthesis             │ │
+│  │  │  └─ [Narrator] Explanations per stage            │ │
+│  │  └─ Lazy-loads pipeline to avoid startup crashes    │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  GraphService (app/services/graph.py)               │ │
+│  │  └─ build_d3_payload() → D3-compatible JSON         │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                             │
+│  External Data Sources:                                     │
+│  ├─ Neo4j: Document graph (hierarchy, citations)          │
+│  ├─ Pinecone: Chunk vectors (semantic search)             │
+│  ├─ OpenRouter: LLM for reasoning + embedding             │
+│  └─ SQLite: Memory (data/db/graphrag_memory.db)          │
+└─────────────────────────────────────────────────────────────┘
 
-The retrieval benchmark evaluates how effectively the system retrieves relevant legal documents given a natural language question. Each question in the ground-truth dataset is annotated with evidence text referencing specific Indonesian regulations (e.g., "PP 34/2021", "Permen PUPR 8/2022"). The benchmark parses these references into structured document identifiers, queries the retrieval systems, and measures recall and precision.
+Response: {"answer": "...", "narratives": [...], "d3": {...}, "logs": [...]}
+```
 
-Two retrieval strategies are compared:
+### Query Execution Flow
 
-1. **VDB-only**: Semantic search against Pinecone using dense embeddings from Indo-LegalBERT-V3.
-2. **GraphRAG**: VDB retrieval augmented with graph-based expansion via Neo4j, traversing citation (CITES) and hierarchical (HIGHER) relationships between legal documents.
-
-### Pipeline
-
-The benchmark executes the following steps for each question:
-
-**Step 1 -- Ground-Truth Extraction**
-
-The system parses the evidence column from the XLSX dataset to identify all referenced legal documents. A regex-based parser matches patterns such as "UU 2/2017", "Permen PUPR 8/2022", or "SK Dirjen BK 2022" and maps them to canonical document identifiers using a normalised type map.
-
-Additionally, the question text itself is parsed for explicit regulation references (e.g., "menurut PP 34/2021"). These are injected into the ground-truth set, as questions that explicitly name a regulation should expect that regulation to appear in the retrieval results.
-
-**Step 2 -- Embedding and VDB Retrieval**
-
-The question text is embedded using the Govnetic/Indo-LegalBERT-V3 model (1024-dimensional vectors). The embedding is used to query Pinecone with `top_k=100` to retrieve a broad set of candidate chunks. These chunks are deduplicated by document identifier, retaining the top 10 unique documents ordered by relevance score.
-
-**Step 3 -- Graph Expansion (GraphRAG)**
-
-Starting from all 10 VDB-retrieved documents, the system queries Neo4j for related documents connected via CITES or HIGHER edges. Up to 5 neighbours are fetched per seed document. The combined set (VDB seeds + graph neighbours) is capped at 20 unique documents.
-
-**Step 4 -- Alias-Aware Scoring**
-
-Indonesian legal documents may be stored under different identifier conventions across systems. For example, "Permen PUPR 8/2022" may appear as `PERMENPUPR-NASIONAL-8-2022` in one system and `PERMEN-NASIONAL-8-2022` in another. The scoring engine builds a cross-system alias map that recognises these equivalences:
-
-| Evidence Text         | Canonical Form                  | Known Alias                  |
-|-----------------------|---------------------------------|------------------------------|
-| Permen PUPR 8/2022    | PERMENPUPR-NASIONAL-8-2022      | PERMEN-NASIONAL-8-2022       |
-| Permen PPN 7/2023     | PERMENPPN-NASIONAL-7-2023       | PERMEN-NASIONAL-7-2023       |
-| Permen Perdagangan 24/2021 | PERMENDAG-NASIONAL-24-2021 | PERMEN-NASIONAL-24-2021      |
-| Peraturan BPS 2/2020  | PERBANBPS-NASIONAL-2-2020       | PERMEN-NASIONAL-2-2020       |
-| SK Dirjen BK 2022     | SKDIRJENBK-NASIONAL-12.1-2022   | KEPDIRJEN-NASIONAL-12.1-2022 |
-| Pergub 20/2024        | PERGUB-PROVINSI-20-2024         | --                           |
-
-A retrieved document matches a ground-truth document if either the canonical form or any of its aliases is present in the retrieved set.
-
-### Configuration Parameters
-
-| Parameter          | Value | Description                                           |
-|--------------------|-------|-------------------------------------------------------|
-| VDB_TOP_K          | 100   | Number of chunks retrieved from Pinecone              |
-| VDB_MAX_DOCS       | 10    | Maximum unique documents retained from VDB            |
-| GRAPHRAG_MAX_DOCS  | 20    | Maximum unique documents in GraphRAG result set       |
-| NEO4J_NEIGHBOURS   | 5     | Graph neighbours fetched per seed document             |
-| EXPAND_FROM_ALL    | True  | Expand from all VDB docs (not just top N)             |
-
-### Metrics
-
-- **Recall**: Fraction of ground-truth documents that appear in the retrieved set.
-- **Precision**: Fraction of retrieved documents that match a ground-truth document.
-
-Both metrics are computed per question and averaged across all scored questions.
+```
+1. User types question in Streamlit
+                 ↓
+2. Streamlit HTTP POST /query
+   {
+     "query": "Apa akibat hukum melanggar UU 11/2020?",
+     "options": {"verbose_debug": true, "return_logs": true}
+   }
+                 ↓
+3. FastAPI routes to AgentService.run_query()
+                 ↓
+4. LangGraph pipeline:
+   [Router] → "semantic" route selected
+      ↓
+   [Semantic Search] → Pinecone (top 10 docs) + BM25 (hybrid)
+      ↓
+   [Deep Research] → Neo4j graph expansion (citations, hierarchy)
+      ↓
+   [Answer Generator] → LLM produces answer + narratives
+                 ↓
+5. GraphService.build_d3_payload() → D3 visualization JSON
+                 ↓
+6. FastAPI returns QueryResponse
+   {
+     "answer": "Melanggar UU No. 11 Tahun 2020 dapat mengakibatkan...",
+     "narratives": ["Saya menemukan dokumen yang relevan...", ...],
+     "primary_doc_ids": ["UU-NASIONAL-11-2020", ...],
+     "d3": {"nodes": [...], "edges": [...], "meta": {...}},
+     "logs": ["[Router] Route: semantic", "[Search] Found 10 docs"],
+     "latency_ms": 2450.5,
+     "route": "semantic"
+   }
+                 ↓
+7. Streamlit displays answer + D3 graph
+```
 
 ---
 
-## Results
+## Environment Setup
 
-### Dataset: QA 100 (All Sectors)
+Create `.env` file in project root:
 
-100 questions spanning construction, architecture, engineering, building, and workforce regulations.
+```env
+# LLM & Embeddings
+OPENROUTER_API_KEY=your_openrouter_key
+HF_AUTH_TOKEN=your_huggingface_token
+HF_ENDPOINT_URL=https://api-inference.huggingface.co
+HF_MODEL_NAME=Govnetic/Indo-LegalBERT-V3
+LLM_MODEL=anthropic/claude-sonnet-4
 
-| Metric                  | VDB-only | GraphRAG |
-|-------------------------|----------|----------|
-| Avg Recall              | 0.5560   | 0.8242   |
-| Avg Precision           | 0.0800   | 0.0656   |
+# Neo4j Graph Database
+NEO4J_URI=neo4j+s://your_neo4j_uri
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_password
 
-**Key observations:**
-- GraphRAG achieves an average recall of 82.42%, a significant improvement over VDB-only at 55.60%.
+# Pinecone Vector Database
+PINECONE_API_KEY=your_pinecone_key
+PINECONE_INDEX_NAME=your_index_name
+
+# Optional: Debugging
+GRAPHRAG_VERBOSE_DEBUG=false
+ENVIRONMENT=development
+```
+
+### Getting API Keys
+
+- **OpenRouter**: https://openrouter.ai/ (Claude, GPT, Llama access)
+- **HuggingFace**: https://huggingface.co/settings/tokens
+- **Neo4j**: https://neo4j.com/cloud/ (cloud instance)
+- **Pinecone**: https://www.pinecone.io/ (vector DB)
+
+---
+
+## Running the System
+
+### Local Development
+
+**Terminal 1 (Backend):**
+```bash
+uvicorn app.api.main:app --reload
+```
+- Runs on `http://localhost:8000`
+- API docs: `http://localhost:8000/docs` (interactive Swagger UI)
+- Health check: `curl http://localhost:8000/health`
+
+**Terminal 2 (Frontend):**
+```bash
+streamlit run app.py
+```
+- Runs on `http://localhost:8501`
+- Auto-reloads on file changes
+
+### Docker (Production-like)
+
+**Build:**
+```bash
+docker build -t graphrag-backend .
+```
+
+**Run:**
+```bash
+docker run -d \
+  --name graphrag \
+  -p 8000:8000 \
+  --env-file .env \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/output:/app/output \
+  graphrag-backend
+```
+
+**Check health:**
+```bash
+curl http://localhost:8000/health
+```
+
+**View logs:**
+```bash
+docker logs -f graphrag
+```
+
+**Stop:**
+```bash
+docker stop graphrag && docker rm graphrag
+```
+
+---
+
+## API Reference
+
+### Health Check
+
+```bash
+GET /health
+```
+Returns:
+```json
+{
+  "status": "ok",
+  "neo4j": true,
+  "pinecone": true
+}
+```
+
+### Query Endpoint
+
+```bash
+POST /query
+Content-Type: application/json
+
+{
+  "query": "Apa itu UU No. 11 Tahun 2020?",
+  "options": {
+    "verbose_debug": false,
+    "return_logs": true,
+    "return_narratives": true
+  }
+}
+```
+
+Response:
+```json
+{
+  "answer": "UU No. 11 Tahun 2020 adalah Undang-Undang tentang...",
+  "narratives": ["Saya menemukan dokumen yang relevan dengan topik Anda..."],
+  "primary_doc_ids": ["UU-NASIONAL-11-2020"],
+  "relationship_context": "- UU-NASIONAL-11-2020 --[CITES]--> PP-NASIONAL-71-2019",
+  "d3": {
+    "nodes": [...],
+    "edges": [...],
+    "meta": {"node_count": 5, "edge_count": 3}
+  },
+  "logs": ["[Agent] Starting query...", "[Router] Route: semantic"],
+  "latency_ms": 2450.5,
+  "route": "semantic"
+}
+```
+
+**Full API documentation:** See [docs/API.md](docs/API.md) or visit `http://localhost:8000/docs` when backend is running.
+
+---
+
+## Complete API & Service Documentation
+
+All core functions, parameters, and examples are documented in **[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)** including:
+- FastAPI endpoints (`/health`, `/query`)
+- Pydantic schemas (QueryRequest, QueryResponse, D3Payload)
+- Service layer (AgentService, GraphService)
+- Utilities (7 modules, 50+ functions)
+
+---
+
+## Development
+
+### Project Organization
+
+- **app/api/** — FastAPI application entry point, endpoints, lifespan
+- **app/services/** — Business logic (agent pipeline, D3 builder)
+- **utils/** — Reusable components (DB clients, memory, visualization)
+- **data/** — Runtime databases and cache (git-ignored)
+- **output/** — Generated files, logs, results (git-ignored)
+- **docs/** — API docs, architecture, function reference
+
+### Making Changes
+
+**Backend logic:**
+- Modify `app/services/agent.py` or `app/services/graph.py`
+- Changes auto-reload with `--reload` flag
+
+**Frontend UI:**
+- Modify `app.py` (Streamlit)
+- Auto-reloads on save
+
+**Add new utilities:**
+- Create in `utils/`
+- Import in services as needed
+- Document in [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)
+
+### Testing
+
+**Health check:**
+```bash
+curl http://localhost:8000/health
+```
+
+**Query via backend:**
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Apa itu pajak?"}'
+```
+
+**Query via Python client:**
+```python
+from utils.fastapi_client import get_client, QueryOptions
+
+client = get_client()
+result = client.query(
+    "Bagaimana cara mengajukan gugatan?",
+    options=QueryOptions(verbose_debug=True),
+    timeout=300
+)
+print(result.answer)
+```
+
+---
+
+## Troubleshooting
+
+### **Backend won't start**
+```
+Error: Could not connect to Neo4j / Pinecone
+```
+**Fix:** Check `.env` file and verify services are running
+```bash
+curl http://localhost:8000/health
+```
+
+### **Streamlit can't reach backend**
+```
+ConnectionError: Could not connect to http://localhost:8000
+```
+**Fix:** Start backend first: `uvicorn app.api.main:app --reload`
+
+### **Query returns 500 error**
+Check backend terminal logs for detailed error message. Fix and restart.
+
+### **Slow responses**
+- Check `latency_ms` in response — if high, Neo4j/Pinecone may be slow
+- Set `verbose_debug=true` to see pipeline stages
+- Review logs at `output/logs/debug.log`
+
+---
+
+## Architecture Changes from Previous Version
+
+| Aspect | Before (Monolithic) | After (Modular) |
+|--------|---------------------|-----------------|
+| **Query Processing** | Streamlit runs agent | FastAPI backend handles pipeline |
+| **Code Structure** | Single `app.py` file | Modular `app/` + `utils/` |
+| **Checkpointing** | Streamlit manages state | Backend manages (SQLite or in-memory) |
+| **Reusability** | Tied to Streamlit | REST API usable by any client |
+| **Deployment** | Single process | Backend + Frontend separate |
+| **Testability** | Hard to test logic | Services can be tested independently |
+| **Scalability** | Limited | Backend scales independently |
+
+---
+
+## Next Steps
+
+- [ ] Deploy backend to production (AWS, Google Cloud, etc.)
+- [ ] Add API authentication (API key, OAuth)
+- [ ] Set up monitoring and alerting
+- [ ] Create React/Vue frontend for better UX
+- [ ] Add conversation history/context window management
+- [ ] Fine-tune LLM prompts for better answers
+- [ ] Expand Neo4j graph with more documents
+- [ ] Optimize Pinecone indexing strategy
+
+---
+
+## References
+
+- **API Documentation:** [docs/API.md](docs/API.md)
+- **Function Reference:** [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)
+- **FastAPI:** https://fastapi.tiangolo.com/
+- **Streamlit:** https://streamlit.io/
+- **LangGraph:** https://python.langchain.com/docs/langgraph/
+- **Neo4j:** https://neo4j.com/
+- **Pinecone:** https://www.pinecone.io/
+
+---
+
+
 - Graph expansion via Neo4j citation and hierarchical relationships recovers documents that semantic search alone misses.
 - Precision is relatively low for both methods because the retrieved set (10 for VDB, up to 20 for GraphRAG) is intentionally broad to maximise recall. This is expected behaviour in a retrieval-first architecture where a downstream LLM performs the final synthesis.
 
