@@ -85,7 +85,8 @@ def setup_checkpointer(deployed: bool = False):
             return checkpointer
         else:
             from langgraph.checkpoint.sqlite import SqliteSaver
-            checkpoint_db = os.path.join(os.path.dirname(__file__), "..", "checkpointer.db")
+            checkpoint_db = os.path.join(os.path.dirname(__file__), "..", "data", "db", "checkpointer.db")
+            os.makedirs(os.path.dirname(checkpoint_db), exist_ok=True)
             conn = sqlite3.connect(checkpoint_db, check_same_thread=False, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
             checkpointer = SqliteSaver(conn)

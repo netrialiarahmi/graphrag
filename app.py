@@ -21,10 +21,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import boto3
-from shared.debug_logger import new_trace_id, log_verbose_event
+from utils.debug_logger import new_trace_id, log_verbose_event
 from utils import neo4j_client, pinecone_client, llm_stance, graph_viz
 from utils.langsmith_config import init_langsmith
 from utils.memory import SemanticMemory
+from utils.fastapi_client import get_client as get_fastapi_client, QueryOptions
 from utils.conflict_logger import (
     is_conflict_related_question, append_conflict_rows, clear_conflict_output_csv,
     VISUALIZE_CSV,
@@ -67,50 +68,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
 SHOW_RELATION_TIMELINE = _env_bool("GRAPHRAG_SHOW_RELATION_TIMELINE", False)
 
 # ── Persistent memory ────────────────────────────────────────────────────────
-_MEMORY_DB = os.path.join(os.path.dirname(__file__), "graphrag_memory.db")
+_MEMORY_DB = os.path.join(os.path.dirname(__file__), "data", "db", "graphrag_memory.db")
 semantic_memory = SemanticMemory(_MEMORY_DB)
 
-# ── LangGraph checkpointer ───────────────────────────────────────────────────
-import sys
-_checkpointer = None
-
-# Detect deployment environment (Streamlit Cloud, Docker, Production)
-_is_deployed = any([
-    "STREAMLIT_SERVER_RUNDIR" in os.environ,
-    os.environ.get("ENVIRONMENT") == "production",
-    os.path.exists("/.dockerenv"),
-])
-
-if _is_deployed:
-    # 🌐 Streamlit Cloud: Use InMemorySaver (no file I/O)
-    try:
-        from langgraph.checkpoint.memory import InMemorySaver
-        _checkpointer = InMemorySaver()
-        print("[CHECKPOINTER] ✅ InMemorySaver initialized for deployed environment", file=sys.stderr)
-    except ImportError:
-        print("[CHECKPOINTER] ⚠️  InMemorySaver not available. Checkpointer disabled.", file=sys.stderr)
-        _checkpointer = None
-    except Exception as e:
-        print(f"[CHECKPOINTER] ⚠️  Failed to init InMemorySaver: {e}. Checkpointer disabled.", file=sys.stderr)
-        _checkpointer = None
-else:
-    # 💻 Local development: Use SqliteSaver (persistent)
-    try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        import sqlite3
-        _CHECKPOINT_DB = os.path.join(os.path.dirname(__file__), "checkpointer.db")
-        _conn = sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False, timeout=30)
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _checkpointer = SqliteSaver(_conn)
-        print(f"[CHECKPOINTER] ✅ SqliteSaver initialized at {_CHECKPOINT_DB}", file=sys.stderr)
-    except ImportError:
-        print("[CHECKPOINTER] ⚠️  SqliteSaver not available. Checkpointer disabled.", file=sys.stderr)
-        _checkpointer = None
-    except Exception as e:
-        print(f"[CHECKPOINTER] ⚠️  Failed to init SqliteSaver: {e}. Checkpointer disabled.", file=sys.stderr)
-        _checkpointer = None
-
-print(f"[CHECKPOINTER] Final: {type(_checkpointer).__name__ if _checkpointer else 'None'}", file=sys.stderr)
+# Note: LangGraph checkpointer is now handled by the FastAPI backend (app/services/agent.py)
 
 # -- Page Config ---------------------------------------------------------------
 st.set_page_config(
@@ -666,77 +627,46 @@ if prompt := st.chat_input("Tanyakan sesuatu tentang regulasi..."):
     with st.chat_message("assistant", avatar="\u2696\uFE0F"):
         _t_start = time.time()
         try:
-            from utils.langgraph_agent import create_agent
-
             with st.status("Menganalisis pertanyaan hukum...", expanded=True) as status:
-                _safe_checkpointer = _checkpointer
+                # Call FastAPI backend instead of running agent directly
                 try:
-                    from langgraph.checkpoint.base import BaseCheckpointSaver
-                    if _safe_checkpointer not in (None, True, False) and not isinstance(_safe_checkpointer, BaseCheckpointSaver):
-                        print(
-                            f"[CHECKPOINTER] Invalid type before create_agent: {type(_safe_checkpointer).__name__}. Fallback to None.",
-                            file=sys.stderr,
-                        )
-                        _safe_checkpointer = None
-                except Exception:
-                    _safe_checkpointer = None
-                print(
-                    f"[CHECKPOINTER] Passing into create_agent: {type(_safe_checkpointer).__name__ if _safe_checkpointer is not None else 'None'}",
-                    file=sys.stderr,
-                )
-                agent = create_agent(checkpointer=_safe_checkpointer)
-
-                # Build initial state with memory context
-                _user_ctx = semantic_memory.get_user_context_prompt()
-                _init_state = {
-                    "query": prompt,
-                    "logs": [],
-                    "narratives": [],
-                    "primary_doc_ids": [],
-                    "trace_id": new_trace_id(),
-                    "verbose_debug": _env_bool("GRAPHRAG_VERBOSE_DEBUG", False),
-                    "chat_history": list(st.session_state.chat_history),
-                    "summary": st.session_state.summary,
-                    "user_context": _user_ctx,
-                }
-                _init_state = cast(dict[str, Any], _init_state)
-
-                # Thread config for checkpointer
-                _thread_config = {"configurable": {"thread_id": st.session_state.active_conv_id}}
-                _thread_config = cast(dict[str, Any], _thread_config)
-
-                final_state = {
-                    "logs": [], "narratives": [], "primary_doc_ids": [],
-                    "context_docs": {}, "answer": "",
-                }
-                _seen_narr = 0
-
-                for event in agent.stream(
-                    cast(Any, _init_state),
-                    config=cast(Any, _thread_config),
-                ):
-                    for _node, _update in event.items():
-                        final_state.update(_update)
-                        if _init_state["verbose_debug"]:
-                            log_verbose_event(
-                                route=final_state.get("route", "unknown"),
-                                stage="agent_stream",
-                                event="node_update",
-                                message=f"Node update from {_node}",
-                                trace_id=_init_state["trace_id"],
-                                payload={
-                                    "node": _node,
-                                    "route": final_state.get("route", "unknown"),
-                                    "primary_doc_ids": final_state.get("primary_doc_ids", []),
-                                    "log_tail": (_update.get("logs") or [])[-12:],
-                                    "narrative_tail": (_update.get("narratives") or [])[-6:],
-                                },
-                            )
-                        _narrs = _update.get("narratives", [])
-                        if len(_narrs) > _seen_narr:
-                            for _n in _narrs[_seen_narr:]:
-                                st.markdown(f"*{_n}*")
-                            _seen_narr = len(_narrs)
+                    client = get_fastapi_client()
+                    options = QueryOptions(
+                        verbose_debug=_env_bool("GRAPHRAG_VERBOSE_DEBUG", False),
+                        return_logs=True,
+                        return_narratives=True,
+                    )
+                    
+                    result = client.query(prompt, options=options, timeout=300)
+                    
+                    # Convert FastAPI response to final_state format compatible with existing code
+                    final_state = {
+                        "logs": result.logs,
+                        "narratives": result.narratives,
+                        "primary_doc_ids": result.primary_doc_ids,
+                        "context_docs": {},  # Not used for visualization anymore
+                        "answer": result.answer,
+                        "route": result.route,
+                        "relationship_context": result.relationship_context,
+                    }
+                    
+                    # Stream narratives to UI as they would have been streamed from agent
+                    _seen_narr = 0
+                    for _n in result.narratives:
+                        st.markdown(f"*{_n}*")
+                    
+                except Exception as e:
+                    # Fallback error handling
+                    st.error(f"Backend error: {e}")
+                    final_state = {
+                        "logs": [f"Backend error: {e}"],
+                        "narratives": [],
+                        "primary_doc_ids": [],
+                        "context_docs": {},
+                        "answer": f"An error occurred: {e}",
+                        "route": "error",
+                        "relationship_context": "",
+                    }
 
                 status.update(label="Analisis selesai", state="complete", expanded=False)
 

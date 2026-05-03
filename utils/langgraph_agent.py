@@ -73,7 +73,7 @@ import json
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 import atexit
-from shared.debug_logger import log_verbose_event
+from utils.debug_logger import log_verbose_event
 from utils import neo4j_client, pinecone_client, llm_stance
 from utils.bm25_index import hybrid_search as _hybrid_search
 from langgraph.checkpoint.base import BaseCheckpointSaver

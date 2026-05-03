@@ -142,7 +142,7 @@ def expand_query(query: str, *, _trace_id: str = "", _route: str = "") -> list[s
     Returns 3-5 alternative search phrases that capture the same legal concept
     using different terminology, specific UU/PP references, and synonyms.
     """
-    from shared.debug_logger import log_event as _dlog
+    from utils.debug_logger import log_event as _dlog
     client = get_llm_client()
 
     system_prompt = """Kamu adalah pakar hukum Indonesia. Tugasmu adalah menghasilkan variasi query pencarian untuk menemukan dokumen regulasi yang relevan di database vektor.
@@ -277,7 +277,7 @@ def rerank_documents(query: str, doc_summaries: dict[str, str], *, _trace_id: st
     list[tuple[str, float]]
         Sorted list of (doc_id, score) with score 0-10, descending.
     """
-    from shared.debug_logger import log_event as _dlog
+    from utils.debug_logger import log_event as _dlog
     if not doc_summaries:
         return []
 
@@ -685,7 +685,7 @@ Instruksi:
 6. Jika ada ketentuan yang mengecualikan atau membatasi aturan umum, sebutkan secara eksplisit."""
 
     if _verbose_debug and _trace_id:
-        from shared.debug_logger import log_event as _dlog
+        from utils.debug_logger import log_event as _dlog
         _dlog(
             trace_id=_trace_id,
             route=_route or "answer",
@@ -724,7 +724,7 @@ Instruksi:
         )
         out = response.choices[0].message.content
         if _verbose_debug and _trace_id:
-            from shared.debug_logger import log_event as _dlog
+            from utils.debug_logger import log_event as _dlog
             _dlog(
                 trace_id=_trace_id,
                 route=_route or "answer",
@@ -739,7 +739,7 @@ Instruksi:
         return out
     except Exception as e:
         if _verbose_debug and _trace_id:
-            from shared.debug_logger import log_event as _dlog
+            from utils.debug_logger import log_event as _dlog
             _dlog(
                 trace_id=_trace_id,
                 route=_route or "answer",

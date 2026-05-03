@@ -44,7 +44,8 @@ async def lifespan(app: FastAPI):
     checkpointer = setup_checkpointer(deployed=is_deployed)
     
     # Initialize agent service
-    memory_db = os.path.join(os.path.dirname(__file__), "..", "graphrag_memory.db")
+    memory_db = os.path.join(os.path.dirname(__file__), "..", "data", "db", "graphrag_memory.db")
+    os.makedirs(os.path.dirname(memory_db), exist_ok=True)
     agent_service = AgentService(checkpointer=checkpointer, memory_db=memory_db)
     agent_service.logger = file_logger
     print("✅ Agent service initialized", flush=True)

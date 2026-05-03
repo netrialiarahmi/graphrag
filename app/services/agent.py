@@ -5,7 +5,7 @@ that runs a query and returns the final state (answer, narratives, logs, etc.).
 """
 import time
 from typing import Dict, Any, List, Optional, cast
-from shared.debug_logger import new_trace_id
+from utils.debug_logger import new_trace_id
 from utils.memory import SemanticMemory
 from utils.helpers import env_bool
 

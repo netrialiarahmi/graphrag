@@ -1,0 +1,2 @@
+# This folder stores runtime database files (checkpointer.db, graphrag_memory.db)
+# The .db files themselves are ignored by .gitignore

@@ -26,7 +26,7 @@ if not os.environ.get("GRAPHRAG_STANDALONE"):
         pass
 
 _CACHE_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "chatbot", "bm25_corpus.json"
+    os.path.dirname(os.path.abspath(__file__)), "..", "data", "cache", "bm25_corpus.json"
 )
 
 # ── Tokenizer ────────────────────────────────────────────────────────────────
